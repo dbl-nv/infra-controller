@@ -106,6 +106,25 @@ func TestFlowGrpcAtomicClient_GrpcServiceClient_ReturnsFlowAfterSwap(t *testing.
 	assert.Equal(t, expected, grpcServiceClient)
 }
 
+func TestFlowGrpcAtomicClient_SwapClient_VersionAdvancesOnInitialSwap(t *testing.T) {
+	fgac := &FlowGrpcAtomicClient{
+		value: &atomic.Value{},
+	}
+
+	// The initial swap has no previous client to return, which is the normal
+	// creation path rather than a failure: it still advances the version.
+	first := &FlowGrpcClient{}
+	assert.Nil(t, fgac.SwapClient(first))
+	assert.Equal(t, int64(1), fgac.Version())
+	assert.Equal(t, first, fgac.GetClient())
+
+	// A later swap hands back the client it replaced.
+	second := &FlowGrpcClient{}
+	assert.Equal(t, first, fgac.SwapClient(second))
+	assert.Equal(t, int64(2), fgac.Version())
+	assert.Equal(t, second, fgac.GetClient())
+}
+
 func TestFlowAtomicClient_CheckCertificates(t *testing.T) {
 	// Generate files for MD5 hash testing
 	clientCertPath := "/tmp/flow_tls.crt"

@@ -97,6 +97,25 @@ func TestCoreGrpcAtomicClient_GetClient_ReturnsClientAfterSwap(t *testing.T) {
 	assert.Equal(t, testClient, cac.GetClient())
 }
 
+func TestCoreGrpcAtomicClient_SwapClient_VersionAdvancesOnInitialSwap(t *testing.T) {
+	cac := &CoreGrpcAtomicClient{
+		value: &atomic.Value{},
+	}
+
+	// The initial swap has no previous client to return, which is the normal
+	// creation path rather than a failure: it still advances the version.
+	first := &CoreGrpcClient{}
+	assert.Nil(t, cac.SwapClient(first))
+	assert.Equal(t, int64(1), cac.Version())
+	assert.Equal(t, first, cac.GetClient())
+
+	// A later swap hands back the client it replaced.
+	second := &CoreGrpcClient{}
+	assert.Equal(t, first, cac.SwapClient(second))
+	assert.Equal(t, int64(2), cac.Version())
+	assert.Equal(t, second, cac.GetClient())
+}
+
 func TestCoreGrpcAtomicClient_CheckCertificates(t *testing.T) {
 	// Generate files for MD5 hash testing
 	// clientCertBytes := []byte("new test cert file")
