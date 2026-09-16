@@ -110,10 +110,11 @@ func TestFlowGrpcAtomicClient_SwapClient(t *testing.T) {
 	first := &FlowGrpcClient{}
 	second := &FlowGrpcClient{}
 
-	// The cases run in order against one atomic client, so each expected predecessor
-	// is the client installed by the case before it.
 	tests := []struct {
-		name        string
+		name string
+		// seed holds the clients swapped in before the call under test, so each
+		// case reaches its starting state without depending on another case.
+		seed        []*FlowGrpcClient
 		newClient   *FlowGrpcClient
 		wantOld     *FlowGrpcClient
 		wantVersion int64
@@ -128,16 +129,20 @@ func TestFlowGrpcAtomicClient_SwapClient(t *testing.T) {
 		},
 		{
 			name:        "test that a later swap returns the client it replaced",
+			seed:        []*FlowGrpcClient{first},
 			newClient:   second,
 			wantOld:     first,
 			wantVersion: 2,
 		},
 	}
-	fgac := &FlowGrpcAtomicClient{
-		value: &atomic.Value{},
-	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			fgac := &FlowGrpcAtomicClient{
+				value: &atomic.Value{},
+			}
+			for _, seeded := range tt.seed {
+				fgac.SwapClient(seeded)
+			}
 			assert.Equal(t, tt.wantOld, fgac.SwapClient(tt.newClient))
 			assert.Equal(t, tt.wantVersion, fgac.Version())
 			assert.Equal(t, tt.newClient, fgac.GetClient())
