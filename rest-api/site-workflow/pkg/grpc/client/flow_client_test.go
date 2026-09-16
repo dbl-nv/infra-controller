@@ -106,23 +106,43 @@ func TestFlowGrpcAtomicClient_GrpcServiceClient_ReturnsFlowAfterSwap(t *testing.
 	assert.Equal(t, expected, grpcServiceClient)
 }
 
-func TestFlowGrpcAtomicClient_SwapClient_VersionAdvancesOnInitialSwap(t *testing.T) {
+func TestFlowGrpcAtomicClient_SwapClient(t *testing.T) {
+	first := &FlowGrpcClient{}
+	second := &FlowGrpcClient{}
+
+	// The cases run in order against one atomic client, so each expected predecessor
+	// is the client installed by the case before it.
+	tests := []struct {
+		name        string
+		newClient   *FlowGrpcClient
+		wantOld     *FlowGrpcClient
+		wantVersion int64
+	}{
+		{
+			name: "test that the initial swap reports no previous client and still advances the version",
+			// Initial creation is the normal path rather than a failure, even though
+			// there is nothing to hand back.
+			newClient:   first,
+			wantOld:     nil,
+			wantVersion: 1,
+		},
+		{
+			name:        "test that a later swap returns the client it replaced",
+			newClient:   second,
+			wantOld:     first,
+			wantVersion: 2,
+		},
+	}
 	fgac := &FlowGrpcAtomicClient{
 		value: &atomic.Value{},
 	}
-
-	// The initial swap has no previous client to return, which is the normal
-	// creation path rather than a failure: it still advances the version.
-	first := &FlowGrpcClient{}
-	assert.Nil(t, fgac.SwapClient(first))
-	assert.Equal(t, int64(1), fgac.Version())
-	assert.Equal(t, first, fgac.GetClient())
-
-	// A later swap hands back the client it replaced.
-	second := &FlowGrpcClient{}
-	assert.Equal(t, first, fgac.SwapClient(second))
-	assert.Equal(t, int64(2), fgac.Version())
-	assert.Equal(t, second, fgac.GetClient())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantOld, fgac.SwapClient(tt.newClient))
+			assert.Equal(t, tt.wantVersion, fgac.Version())
+			assert.Equal(t, tt.newClient, fgac.GetClient())
+		})
+	}
 }
 
 func TestFlowAtomicClient_CheckCertificates(t *testing.T) {

@@ -97,23 +97,43 @@ func TestCoreGrpcAtomicClient_GetClient_ReturnsClientAfterSwap(t *testing.T) {
 	assert.Equal(t, testClient, cac.GetClient())
 }
 
-func TestCoreGrpcAtomicClient_SwapClient_VersionAdvancesOnInitialSwap(t *testing.T) {
+func TestCoreGrpcAtomicClient_SwapClient(t *testing.T) {
+	first := &CoreGrpcClient{}
+	second := &CoreGrpcClient{}
+
+	// The cases run in order against one atomic client, so each expected predecessor
+	// is the client installed by the case before it.
+	tests := []struct {
+		name        string
+		newClient   *CoreGrpcClient
+		wantOld     *CoreGrpcClient
+		wantVersion int64
+	}{
+		{
+			name: "test that the initial swap reports no previous client and still advances the version",
+			// Initial creation is the normal path rather than a failure, even though
+			// there is nothing to hand back.
+			newClient:   first,
+			wantOld:     nil,
+			wantVersion: 1,
+		},
+		{
+			name:        "test that a later swap returns the client it replaced",
+			newClient:   second,
+			wantOld:     first,
+			wantVersion: 2,
+		},
+	}
 	cac := &CoreGrpcAtomicClient{
 		value: &atomic.Value{},
 	}
-
-	// The initial swap has no previous client to return, which is the normal
-	// creation path rather than a failure: it still advances the version.
-	first := &CoreGrpcClient{}
-	assert.Nil(t, cac.SwapClient(first))
-	assert.Equal(t, int64(1), cac.Version())
-	assert.Equal(t, first, cac.GetClient())
-
-	// A later swap hands back the client it replaced.
-	second := &CoreGrpcClient{}
-	assert.Equal(t, first, cac.SwapClient(second))
-	assert.Equal(t, int64(2), cac.Version())
-	assert.Equal(t, second, cac.GetClient())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantOld, cac.SwapClient(tt.newClient))
+			assert.Equal(t, tt.wantVersion, cac.Version())
+			assert.Equal(t, tt.newClient, cac.GetClient())
+		})
+	}
 }
 
 func TestCoreGrpcAtomicClient_CheckCertificates(t *testing.T) {
