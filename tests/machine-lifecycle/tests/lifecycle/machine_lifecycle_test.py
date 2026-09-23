@@ -46,6 +46,7 @@ from lib.config import (
     load_config,
 )
 from lib.ephemeral_os import (
+    EphemeralOperatingSystem,
     TEMPORARY_OS_DESCRIPTION,
     build_ephemeral_operating_system,
 )
@@ -178,6 +179,20 @@ def _run_machine_lifecycle(test_config: Config, run_started_at: float) -> None:
     ##################################
     # 1. Setup and log initial state #
     ##################################
+
+    ephemeral_os: EphemeralOperatingSystem | None = None
+    if test_config.lifecycle.mode is not LifecycleMode.INGESTION_ONLY:
+        output.start_stage("Operating-system definition preparation")
+        operating_system = test_config.operating_system
+        if operating_system is None:
+            raise ConfigError("Operating-system configuration is required for provisioning")
+        ephemeral_os = build_ephemeral_operating_system(
+            operating_system.ipxe_script_path,
+            operating_system.user_data_template_path,
+            debug_public_key=test_config.debug.ssh_public_key,
+            enable_console_password=test_config.debug.enable_console_password,
+        )
+
     output.start_stage("Machine discovery and preflight")
     machine_info = collect_machine_info(test_config)
     site_config = setup_site_config(test_config, machine_info)
@@ -212,8 +227,9 @@ def _run_machine_lifecycle(test_config: Config, run_started_at: float) -> None:
         print("Skipping ingestion portion because lifecycle mode is provision-only")
 
     if test_config.lifecycle.mode is not LifecycleMode.INGESTION_ONLY:
+        assert ephemeral_os is not None
         _run_provisioning_cycles(
-            test_config, site_config, machine_info, run_started_at
+            test_config, site_config, machine_info, ephemeral_os, run_started_at
         )
     else:
         print("Skipping instance provision portion because lifecycle mode is ingestion-only")
@@ -292,6 +308,7 @@ def _run_provisioning_cycles(
     test_config: Config,
     site_config: SiteConfig,
     machine_info: MachineInfo,
+    ephemeral_os: EphemeralOperatingSystem,
     run_started_at: float,
 ) -> None:
     """Reconcile networking, run provisioning cycles, and clean up owned resources."""
@@ -317,16 +334,13 @@ def _run_provisioning_cycles(
         temporary_os_name = None
         try:
             output.start_stage("Temporary operating-system creation")
-            ephemeral_os = build_ephemeral_operating_system(
-                debug_public_key=test_config.debug.ssh_public_key,
-                enable_console_password=test_config.debug.enable_console_password,
-            )
             temporary_os_name = ephemeral_os.name
             if test_config.debug.ssh_public_key:
                 print("Authorizing the operator's debug SSH key on this instance")
             if ephemeral_os.console_password is not None:
                 debug_artifacts.publish_console_password(
-                    ephemeral_os.console_password
+                    ephemeral_os.console_password,
+                    username=ephemeral_os.ssh_username,
                 )
             print(f"Creating temporary operating system {ephemeral_os.name}")
             created_os = nico_rest.create_operating_system(
@@ -351,6 +365,7 @@ def _run_provisioning_cycles(
                     machine_info,
                     ngc_uuids,
                     ephemeral_os.ssh_private_key,
+                    ephemeral_os.ssh_username,
                     run_started_at=run_started_at,
                 )
                 if test_config.debug.keep_instance:
@@ -1337,6 +1352,7 @@ def create_instance_and_verify(
     machine_info: MachineInfo,
     ngc_uuids: NGCUUIDs,
     ssh_private_key: paramiko.PKey,
+    ssh_username: str,
     *,
     run_started_at: float | None = None,
 ) -> str | None:
@@ -1349,6 +1365,7 @@ def create_instance_and_verify(
         machine_info: The discovered host and DPU identifiers
         ngc_uuids: Object containing all required NGC UUIDs
         ssh_private_key: Per-run key generated with the ephemeral OS definition
+        ssh_username: Cloud-init user carrying the generated public key
         run_started_at: Monotonic timestamp captured when this MLT run started
     Returns:
         str: The instance UUID
@@ -1396,7 +1413,7 @@ def create_instance_and_verify(
                     ssh_client.connect(
                         instance_ip_address,
                         pkey=ssh_private_key,
-                        username="machine-lifecycle-test-user",
+                        username=ssh_username,
                         timeout=30,
                     )
 

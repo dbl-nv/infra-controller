@@ -22,19 +22,19 @@ from lib.debug_artifacts import publish_console_password
 def test_writes_the_password_into_the_artifact_directory(monkeypatch, tmp_path):
     monkeypatch.setenv("ARTIFACT_DIR", str(tmp_path))
 
-    report = publish_console_password("hunter2hunter2hunter")
+    report = publish_console_password("hunter2hunter2hunter", username="custom-user")
 
     assert report is not None
     body = report.read_text(encoding="utf-8")
     assert "hunter2hunter2hunter" in body
-    assert "username: machine-lifecycle-test-user" in body
+    assert "username: custom-user" in body
 
 
 def test_creates_the_artifact_directory_when_absent(monkeypatch, tmp_path):
     target = tmp_path / "artifacts" / "nested"
     monkeypatch.setenv("ARTIFACT_DIR", str(target))
 
-    report = publish_console_password("hunter2hunter2hunter")
+    report = publish_console_password("hunter2hunter2hunter", username="custom-user")
 
     assert report is not None and report.is_file()
 
@@ -42,7 +42,9 @@ def test_creates_the_artifact_directory_when_absent(monkeypatch, tmp_path):
 def test_includes_the_instance_address_when_known(monkeypatch, tmp_path):
     monkeypatch.setenv("ARTIFACT_DIR", str(tmp_path))
 
-    report = publish_console_password("pw", instance_ip_address="10.0.0.5")
+    report = publish_console_password(
+        "pw", username="custom-user", instance_ip_address="10.0.0.5"
+    )
 
     assert "10.0.0.5" in report.read_text(encoding="utf-8")
 
@@ -50,7 +52,9 @@ def test_includes_the_instance_address_when_known(monkeypatch, tmp_path):
 def test_returns_none_when_the_platform_supplies_no_artifact_directory(monkeypatch):
     monkeypatch.delenv("ARTIFACT_DIR", raising=False)
 
-    assert publish_console_password("hunter2hunter2hunter") is None
+    assert publish_console_password(
+        "hunter2hunter2hunter", username="custom-user"
+    ) is None
 
 
 def test_an_unwritable_artifact_directory_does_not_raise(monkeypatch, tmp_path):
@@ -59,14 +63,18 @@ def test_an_unwritable_artifact_directory_does_not_raise(monkeypatch, tmp_path):
     blocker.write_text("", encoding="utf-8")
     monkeypatch.setenv("ARTIFACT_DIR", str(blocker / "artifacts"))
 
-    assert publish_console_password("hunter2hunter2hunter") is None
+    assert publish_console_password(
+        "hunter2hunter2hunter", username="custom-user"
+    ) is None
 
 
 def test_explains_how_to_avoid_too_many_authentication_failures(monkeypatch, tmp_path):
     """ssh offers loaded keys first and sshd disconnects before prompting."""
     monkeypatch.setenv("ARTIFACT_DIR", str(tmp_path))
 
-    body = publish_console_password("hunter2hunter2hunter").read_text(encoding="utf-8")
+    body = publish_console_password(
+        "hunter2hunter2hunter", username="custom-user"
+    ).read_text(encoding="utf-8")
 
     assert "PreferredAuthentications=password" in body
     assert "PubkeyAuthentication=no" in body
@@ -78,7 +86,9 @@ def test_the_password_file_is_not_world_readable(monkeypatch, tmp_path):
     monkeypatch.setenv("ARTIFACT_DIR", str(tmp_path / "artifacts"))
     original_umask = os.umask(0o022)
     try:
-        report = publish_console_password("hunter2hunter2hunter")
+        report = publish_console_password(
+            "hunter2hunter2hunter", username="custom-user"
+        )
     finally:
         os.umask(original_umask)
 
@@ -101,7 +111,9 @@ def test_an_existing_artifact_is_replaced_not_rewritten_in_place(monkeypatch, tm
     stale_inode = stale.stat().st_ino
     # Holds the old inode open exactly as a racing reader would.
     with open(stale, encoding="utf-8") as racing_reader:
-        report = publish_console_password("hunter2hunter2hunter")
+        report = publish_console_password(
+            "hunter2hunter2hunter", username="custom-user"
+        )
         assert "hunter2hunter2hunter" not in racing_reader.read()
 
     assert stat.S_IMODE(report.stat().st_mode) == 0o600
@@ -113,6 +125,6 @@ def test_no_staged_temporary_file_is_left_behind(monkeypatch, tmp_path):
     """The staging file must not survive to be collected as an artifact."""
     monkeypatch.setenv("ARTIFACT_DIR", str(tmp_path))
 
-    publish_console_password("hunter2hunter2hunter")
+    publish_console_password("hunter2hunter2hunter", username="custom-user")
 
     assert [p.name for p in tmp_path.iterdir()] == ["debug-access.txt"]

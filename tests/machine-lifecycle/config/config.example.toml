@@ -40,6 +40,19 @@ cleanup = true
 # you meant to use.
 create_missing = true
 
+# Text files supplied by the operator. Relative paths are resolved against the
+# working directory from which the MLT process is started, not this TOML file.
+# Required for full and provision-only; these settings may be omitted and are
+# ignored for ingestion-only.
+#
+# The iPXE script must start with #!ipxe and reference ${cloudinit-url}; it is
+# responsible for selecting and retrieving every boot or image artifact.
+# The cloud-init YAML must contain exactly one __MLT_SSH_PUBLIC_KEY__ list item
+# in ssh_authorized_keys on a concrete user with a non-empty name.
+[operating_system]
+ipxe_script_path = "replace-with/boot.ipxe"
+user_data_template_path = "replace-with/user-data.yaml"
+
 # Best-effort cleanup of temporary MLT OS definitions left by interrupted jobs.
 # It only considers tenant-owned iPXE definitions carrying MLT's exact name and
 # description markers, and preserves any definition still referenced by an
@@ -66,17 +79,20 @@ test_sitewide_bmc_fallback = false
 # the instance. Also settable as $MLT_DEBUG_SSH_PUBLIC_KEY.
 # ssh_public_key = "ssh-ed25519 AAAA... you@host"
 
-# Mint a random password per run for machine-lifecycle-test-user -- the same
-# account the test logs in as -- and write it to $ARTIFACT_DIR/debug-access.txt.
+# Mint a random password per run for the user inferred from the generated SSH
+# key, and write it to $ARTIFACT_DIR/debug-access.txt.
 # Covers the case where the box installed but never came up on the network,
 # leaving the BMC serial console as the only way in. It does not help if
 # autoinstall itself fails: no account in this file exists until the installer
-# has finished and rebooted. That account carries passwordless sudo, so treat
-# the published password as root.
+# has finished and rebooted. The supplied template determines that account's
+# privileges; protect the published password accordingly.
 #
-# Enabling this is what sets cloud-init's ssh_pwauth; with it off, every
-# account's password stays locked. This is a switch, not somewhere to put a
-# password of your own -- the run generates its own and this only turns it on.
+# This requires the user-data template to contain all three optional controls:
+# top-level ssh_pwauth: __MLT_ALLOW_PW__, plus
+# passwd: __MLT_USER_PASSWORD__ and lock_passwd: __MLT_LOCK_PASSWD__ on the
+# inferred SSH user. They must be supplied together or all omitted. When they
+# are supplied, MLT keeps password login locked by default and unlocks only that
+# user when this switch is true. MLT generates the password itself.
 # Also settable as $ENABLE_MLT_DEBUG_CONSOLE_PASSWORD.
 # enable_console_password = true
 

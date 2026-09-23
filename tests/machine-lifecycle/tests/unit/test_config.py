@@ -31,6 +31,8 @@ REQUIRED_ENVIRONMENT = {
     "MLT_VPC_PREFIX_NAME": "test-prefix",
     "MLT_IP_BLOCK_NAME": "test-ip-block",
     "MLT_VPC_PREFIX_LENGTH": "29",
+    "MLT_OS_IPXE_SCRIPT_PATH": "test-inputs/boot.ipxe",
+    "MLT_OS_USER_DATA_TEMPLATE_PATH": "test-inputs/user-data.yaml",
 }
 
 
@@ -119,6 +121,10 @@ vpc_name = "default-vpc"
 vpc_prefix_name = "default-prefix"
 ip_block_name = "default-ip-block"
 vpc_prefix_length = 29
+
+[operating_system]
+ipxe_script_path = "boot.ipxe"
+user_data_template_path = "user-data.yaml"
 """,
     )
     monkeypatch.setattr(config_module, "_DEFAULT_CONFIG_PATH", default_path)
@@ -128,6 +134,7 @@ vpc_prefix_length = 29
     assert loaded.site.name == "default-site"
     assert loaded.target.machine_id == "fm100ht-from-default"
     assert loaded.resources.vpc_name == "default-vpc"
+    assert loaded.operating_system.ipxe_script_path == (Path.cwd() / "boot.ipxe").resolve()
 
 
 def test_loads_environment_only_configuration():
@@ -141,6 +148,12 @@ def test_loads_environment_only_configuration():
     assert loaded.resources.ip_block_name == "test-ip-block"
     assert loaded.resources.vpc_prefix_length == 29
     assert loaded.resources.cleanup is True
+    assert loaded.operating_system.ipxe_script_path == (
+        Path.cwd() / "test-inputs/boot.ipxe"
+    ).resolve()
+    assert loaded.operating_system.user_data_template_path == (
+        Path.cwd() / "test-inputs/user-data.yaml"
+    ).resolve()
     assert loaded.lifecycle.mode is LifecycleMode.FULL
     assert loaded.provision_cycles == 1
     assert loaded.skip_factory_reset is False
@@ -164,6 +177,71 @@ def test_ingestion_only_does_not_require_network_resources():
 
     assert loaded.lifecycle.mode is LifecycleMode.INGESTION_ONLY
     assert loaded.resources is None
+    assert loaded.operating_system is None
+
+
+def test_ingestion_only_ignores_operating_system_values_but_rejects_unknown_keys(
+    tmp_path,
+):
+    config_path = _write_config(
+        tmp_path / "mlt.toml",
+        "[operating_system]\nipxe_script_path = ''\nuser_data_template_path = ''\n",
+    )
+    environment = {
+        "SITE_UNDER_TEST": "test-site",
+        "MACHINE_UNDER_TEST": "fm100ht-test-machine",
+        "DPU_COUNT": "2",
+        "MLT_MODE": "ingestion-only",
+        "MLT_OS_IPXE_SCRIPT_PATH": "missing.ipxe",
+        "MLT_OS_USER_DATA_TEMPLATE_PATH": "missing.yaml",
+    }
+
+    assert load_config(config_path=config_path, environ=environment).operating_system is None
+
+    config_path.write_text(
+        "[operating_system]\nunexpected = true\n", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match="unexpected"):
+        load_config(config_path=config_path, environ=environment)
+
+
+@pytest.mark.parametrize(
+    "missing_variable",
+    ["MLT_OS_IPXE_SCRIPT_PATH", "MLT_OS_USER_DATA_TEMPLATE_PATH"],
+)
+def test_provisioning_modes_require_both_operating_system_paths(missing_variable):
+    environment = dict(REQUIRED_ENVIRONMENT)
+    del environment[missing_variable]
+
+    with pytest.raises(ConfigError, match=rf"\${missing_variable}"):
+        load_config(environ=environment)
+
+
+def test_operating_system_paths_are_resolved_against_process_working_directory(
+    monkeypatch, tmp_path
+):
+    monkeypatch.chdir(tmp_path)
+    loaded = load_config(environ=REQUIRED_ENVIRONMENT)
+
+    assert loaded.operating_system.ipxe_script_path == (
+        tmp_path / "test-inputs/boot.ipxe"
+    ).resolve()
+    assert loaded.operating_system.user_data_template_path == (
+        tmp_path / "test-inputs/user-data.yaml"
+    ).resolve()
+
+
+def test_operating_system_path_resolution_failure_is_a_config_error(monkeypatch):
+    def fail_to_resolve(_path):
+        raise RuntimeError("symlink loop")
+
+    monkeypatch.setattr(Path, "resolve", fail_to_resolve)
+
+    with pytest.raises(
+        ConfigError,
+        match="operating_system.ipxe_script_path could not be resolved: symlink loop",
+    ):
+        load_config(environ=REQUIRED_ENVIRONMENT)
 
 
 @pytest.mark.parametrize("cleanup_source", ["environment", "toml"])
@@ -216,9 +294,7 @@ def test_ingestion_only_create_missing_alone_does_not_configure_network_resource
 
 def test_create_missing_defaults_to_true():
     environment = {
-        "SITE_UNDER_TEST": "test-site",
-        "MACHINE_UNDER_TEST": "fm100ht-test-machine",
-        "DPU_COUNT": "2",
+        **REQUIRED_ENVIRONMENT,
         "MLT_MODE": "full",
         "MLT_VPC_NAME": "mlt-vpc",
         "MLT_VPC_PREFIX_NAME": "mlt-prefix",
@@ -282,6 +358,10 @@ skip_factory_reset = false
 enabled = false
 minimum_age_hours = 12
 dry_run = true
+
+[operating_system]
+ipxe_script_path = "toml-boot.ipxe"
+user_data_template_path = "toml-user-data.yaml"
 """,
     )
     environment = {
@@ -296,6 +376,8 @@ dry_run = true
         "MLT_OS_JANITOR_ENABLED": "true",
         "MLT_OS_JANITOR_MINIMUM_AGE_HOURS": "36",
         "MLT_OS_JANITOR_DRY_RUN": "false",
+        "MLT_OS_IPXE_SCRIPT_PATH": "env-boot.ipxe",
+        "MLT_OS_USER_DATA_TEMPLATE_PATH": "env-user-data.yaml",
     }
 
     loaded = load_config(environ=environment)
@@ -316,6 +398,12 @@ dry_run = true
     assert loaded.os_janitor.enabled is True
     assert loaded.os_janitor.minimum_age_hours == 36
     assert loaded.os_janitor.dry_run is False
+    assert loaded.operating_system.ipxe_script_path == (
+        Path.cwd() / "env-boot.ipxe"
+    ).resolve()
+    assert loaded.operating_system.user_data_template_path == (
+        Path.cwd() / "env-user-data.yaml"
+    ).resolve()
 
 
 @pytest.mark.parametrize(
@@ -328,6 +416,8 @@ dry_run = true
         "MLT_VPC_PREFIX_NAME",
         "MLT_IP_BLOCK_NAME",
         "MLT_VPC_PREFIX_LENGTH",
+        "MLT_OS_IPXE_SCRIPT_PATH",
+        "MLT_OS_USER_DATA_TEMPLATE_PATH",
     ],
 )
 def test_rejects_missing_required_values(missing_variable):
@@ -413,6 +503,9 @@ vpc_name = "test-vpc"
 vpc_prefix_name = "test-prefix"
 ip_block_name = "test-ip-block"
 vpc_prefix_length = 29
+[operating_system]
+ipxe_script_path = "boot.ipxe"
+user_data_template_path = "user-data.yaml"
 [diagnostics.kubernetes]
 enabled = true
 lookback_minutes = 15
@@ -740,6 +833,10 @@ vpc_name = "toml-vpc"
 vpc_prefix_name = "toml-prefix"
 ip_block_name = "toml-ip-block"
 vpc_prefix_length = 29
+
+[operating_system]
+ipxe_script_path = "boot.ipxe"
+user_data_template_path = "user-data.yaml"
 
 [grpc_api]
 url = "https://api.example.test:1079"

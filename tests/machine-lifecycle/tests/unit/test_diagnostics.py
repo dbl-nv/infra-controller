@@ -530,6 +530,7 @@ def test_assignment_timeout_triggers_diagnostics_with_instance_id(monkeypatch):
             machine_info,
             ngc_uuids,
             object(),
+            "custom-user",
             run_started_at=123.0,
         )
 

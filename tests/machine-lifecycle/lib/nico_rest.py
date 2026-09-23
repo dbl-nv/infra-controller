@@ -234,7 +234,11 @@ def _dispatch(
     return url, response
 
 
-def _check(method: str, url: str, response: requests.Response) -> requests.Response:
+def _check(
+    method: str,
+    url: str,
+    response: requests.Response,
+) -> requests.Response:
     """Return the response, or raise NicoError describing an error status."""
     if not response.ok:
         raise NicoError(_error_message(method, url, response))
@@ -302,7 +306,10 @@ def _pagination_total(response: requests.Response) -> int | None:
     return total if isinstance(total, int) else None
 
 
-def _list(resource: str, params: dict[str, str] | None = None) -> list[dict]:
+def _list(
+    resource: str,
+    params: dict[str, str] | None = None,
+) -> list[dict]:
     """Page through a list endpoint and return every item.
 
     A site holds more objects than the 20-item default page, so an unpaged
@@ -455,7 +462,19 @@ def list_ip_blocks(site_uuid: str) -> list[dict]:
 
 def get_operating_system_uuid(operating_system_name: str) -> str:
     """Given an operating system name, find its UUID."""
-    return _find_by_name("operating-system", operating_system_name)["id"]
+    try:
+        operating_system = _find_by_name(
+            "operating-system",
+            operating_system_name,
+            list_operating_systems(query=operating_system_name),
+        )
+    except NicoError:
+        operating_system = _find_by_name(
+            "operating-system",
+            operating_system_name,
+            list_operating_systems(),
+        )
+    return operating_system["id"]
 
 
 def list_operating_systems(
@@ -517,28 +536,28 @@ def create_operating_system(
         body["description"] = description
 
     response = _request("POST", "operating-system", body=body)
-    print("operating-system create response:")
-    print(response.text)
     data = _json(response)
     if not isinstance(data, dict):
-        raise NicoError(f"Unexpected operating-system create response: {data!r}")
+        raise NicoError("Unexpected operating-system create response: expected an object")
     operating_system_uuid = data.get("id")
     if not isinstance(operating_system_uuid, str) or not operating_system_uuid.strip():
         raise NicoError(
             "Unexpected operating-system create response: missing a non-empty "
-            f"'id': {data!r}"
+            "'id'"
         )
+    print(f"Created operating system {operating_system_uuid}")
     return data
 
 
 def get_operating_system(operating_system_uuid: str) -> dict:
     """Get the current representation of an operating system."""
     response = _request(
-        "GET", f"operating-system/{quote(operating_system_uuid, safe='')}"
+        "GET",
+        f"operating-system/{quote(operating_system_uuid, safe='')}",
     )
     data = _json(response)
     if not isinstance(data, dict):
-        raise NicoError(f"Unexpected operating-system get response: {data!r}")
+        raise NicoError("Unexpected operating-system get response: expected an object")
     return data
 
 
@@ -553,14 +572,13 @@ def wait_for_operating_system_ready(
         if not isinstance(status, str) or not status.strip():
             raise NicoError(
                 f"Operating system {operating_system_uuid} returned invalid status "
-                f"payload: {operating_system}"
+                "payload"
             )
         if status == "Ready":
             return
         if status in {"Error", "Failed", "Deactivated"}:
             raise NicoError(
-                f"Operating system {operating_system_uuid} entered terminal status {status}: "
-                f"{operating_system}"
+                f"Operating system {operating_system_uuid} entered terminal status {status}"
             )
         print(
             f"{now.strftime('%Y-%m-%d %H:%M:%S')}: operating system "

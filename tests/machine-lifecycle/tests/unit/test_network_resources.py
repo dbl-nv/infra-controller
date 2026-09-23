@@ -576,7 +576,7 @@ def test_provisioning_cleanup_runs_when_reconciliation_fails(monkeypatch):
 
     with pytest.raises(RuntimeError, match="lifecycle failed"):
         lifecycle._run_provisioning_cycles(
-            test_config, site_config, SimpleNamespace(), 0.0
+            test_config, site_config, SimpleNamespace(), SimpleNamespace(), 0.0
         )
 
     assert ownership_seen == ["owned-vpc"]
@@ -600,7 +600,7 @@ def test_provisioning_warns_and_skips_cleanup_when_disabled(monkeypatch, capsys)
 
     with pytest.raises(RuntimeError, match="lifecycle failed"):
         lifecycle._run_provisioning_cycles(
-            test_config, site_config, SimpleNamespace(), 0.0
+            test_config, site_config, SimpleNamespace(), SimpleNamespace(), 0.0
         )
 
     assert "Resources created by this run were not deleted" in capsys.readouterr().out
@@ -627,9 +627,11 @@ def test_provisioning_does_not_warn_when_disabled_cleanup_has_no_owned_resources
     )
     monkeypatch.setattr(lifecycle, "collect_ngc_uuids", lambda *_args: object())
     monkeypatch.setattr(
-        lifecycle,
-        "build_ephemeral_operating_system",
-        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("OS creation failed")),
+        nico_rest,
+        "create_operating_system",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("OS creation failed")
+        ),
     )
     monkeypatch.setattr(
         network_resources,
@@ -639,7 +641,16 @@ def test_provisioning_does_not_warn_when_disabled_cleanup_has_no_owned_resources
 
     with pytest.raises(RuntimeError, match="OS creation failed"):
         lifecycle._run_provisioning_cycles(
-            test_config, site_config, SimpleNamespace(), 0.0
+            test_config,
+            site_config,
+            SimpleNamespace(),
+            SimpleNamespace(
+                name="mlt-os-test",
+                ipxe_script="#!ipxe",
+                user_data="#cloud-config",
+                console_password=None,
+            ),
+            0.0,
         )
 
     assert "WARNING" not in capsys.readouterr().out
@@ -656,6 +667,13 @@ def test_ingestion_only_does_not_reconcile_network_resources(monkeypatch):
     site_config = object()
 
     monkeypatch.setattr(lifecycle, "collect_machine_info", lambda _config: machine_info)
+    monkeypatch.setattr(
+        lifecycle,
+        "build_ephemeral_operating_system",
+        lambda *_args, **_kwargs: pytest.fail(
+            "ingestion-only must not read operating-system inputs"
+        ),
+    )
     monkeypatch.setattr(lifecycle, "setup_site_config", lambda _config, _machine_info: site_config)
     monkeypatch.setattr(lifecycle, "_mask_site_config_creds", lambda _site_config: {})
     monkeypatch.setattr(lifecycle, "verify_initial_machine_state", lambda *_args: None)

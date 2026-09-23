@@ -36,7 +36,10 @@ _FILENAME = "debug-access.txt"
 
 
 def publish_console_password(
-    password: str, *, instance_ip_address: str | None = None
+    password: str,
+    *,
+    username: str,
+    instance_ip_address: str | None = None,
 ) -> Path | None:
     """Write the run's console password to the artifact directory.
 
@@ -57,18 +60,18 @@ def publish_console_password(
         "Console access for this machine-lifecycle-test run.\n"
         "\n"
         f"  instance{location}\n"
-        "  username: machine-lifecycle-test-user\n"
+        f"  username: {username}\n"
         f"  password: {password}\n"
         "\n"
-        "This is the account the test itself logs in as. It carries passwordless\n"
-        "sudo, so treat the password as root. It exists only on the instance this\n"
+        "This is the account the test itself logs in as. Its privileges are set\n"
+        "by the supplied cloud-init template. It exists only on the instance this\n"
         "run created and is destroyed with it. Reach it over the BMC serial\n"
         "console or over SSH.\n"
         "\n"
         "Over SSH, force password authentication:\n"
         "\n"
         "  ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no \\\n"
-        "      machine-lifecycle-test-user@<instance-ip>\n"
+        f"      {username}@<instance-ip>\n"
         "\n"
         "Without those options ssh offers every key your agent has loaded first\n"
         "and sshd closes the connection with \"Too many authentication failures\"\n"

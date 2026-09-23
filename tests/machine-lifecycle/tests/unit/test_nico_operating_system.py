@@ -29,7 +29,9 @@ def _response(payload: object) -> requests.Response:
     return response
 
 
-def test_create_operating_system_uses_tenant_and_expected_fields(monkeypatch):
+def test_create_operating_system_uses_tenant_and_expected_fields(
+    monkeypatch, capsys
+):
     monkeypatch.setattr(nico_rest, "get_tenant_uuid", lambda: "tenant-id")
     captured = {}
 
@@ -61,6 +63,27 @@ def test_create_operating_system_uses_tenant_and_expected_fields(monkeypatch):
             "description": "temporary",
         },
     }
+    output = capsys.readouterr().out
+    assert "Created operating system os-id" in output
+    assert "#!ipxe" not in output
+    assert "#cloud-config" not in output
+
+
+def test_os_response_errors_include_server_message_and_data():
+    response = _response(
+        {"message": "user data rejected", "data": {"field": "userData"}}
+    )
+    response.status_code = 400
+
+    with pytest.raises(nico_rest.NicoError) as raised:
+        nico_rest._check(
+            "POST",
+            "https://nico.example/operating-system",
+            response,
+        )
+
+    assert "user data rejected" in str(raised.value)
+    assert "userData" in str(raised.value)
 
 
 def test_create_operating_system_rejects_response_without_id(monkeypatch):
@@ -125,15 +148,35 @@ def test_list_operating_systems_passes_search_query(monkeypatch):
     monkeypatch.setattr(
         nico_rest,
         "_list",
-        lambda resource, params=None: captured.append((resource, params)) or [],
+        lambda resource, params=None, **kwargs: captured.append(
+            (resource, params, kwargs)
+        )
+        or [],
     )
 
     assert nico_rest.list_operating_systems(
         query="mlt-os-", operating_system_type="iPXE"
     ) == []
     assert captured == [
-        ("operating-system", {"query": "mlt-os-", "type": "iPXE"})
+        (
+            "operating-system",
+            {"query": "mlt-os-", "type": "iPXE"},
+            {},
+        )
     ]
+
+
+def test_operating_system_uuid_uses_filtered_exact_match_without_fallback(monkeypatch):
+    calls = []
+
+    def list_operating_systems(*, query=None, operating_system_type=None):
+        calls.append((query, operating_system_type))
+        return [{"id": "os-id", "name": "mlt-os-exact"}]
+
+    monkeypatch.setattr(nico_rest, "list_operating_systems", list_operating_systems)
+
+    assert nico_rest.get_operating_system_uuid("mlt-os-exact") == "os-id"
+    assert calls == [("mlt-os-exact", None)]
 
 
 def test_list_instances_for_operating_system_uses_server_filter(monkeypatch):

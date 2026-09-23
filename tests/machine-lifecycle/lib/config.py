@@ -130,6 +130,14 @@ class LifecycleConfig:
 
 
 @dataclass(frozen=True)
+class OperatingSystemConfig:
+    """External textual definitions used to build the per-run NICo OS."""
+
+    ipxe_script_path: Path
+    user_data_template_path: Path
+
+
+@dataclass(frozen=True)
 class DebugConfig:
     """Optional break-glass access to an instance left behind by a failed run.
 
@@ -188,6 +196,8 @@ class Config:
     target: TargetConfig
     resources: NetworkResourcesConfig | None
     lifecycle: LifecycleConfig
+    # Ingestion-only runs do not provision and therefore ignore OS inputs.
+    operating_system: OperatingSystemConfig | None
     diagnostics: DiagnosticsConfig
     os_janitor: OSJanitorConfig = OSJanitorConfig()
     # Absent when the run supplies its own NICo bearer.
@@ -259,6 +269,7 @@ _TOP_LEVEL_KEYS = frozenset(
         "target",
         "resources",
         "lifecycle",
+        "operating_system",
         "debug",
         "diagnostics",
         "os_janitor",
@@ -299,6 +310,9 @@ _SECTION_KEYS = {
     ),
     "lifecycle": frozenset(
         {"mode", "provision_cycles", "skip_factory_reset", "test_sitewide_bmc_fallback"}
+    ),
+    "operating_system": frozenset(
+        {"ipxe_script_path", "user_data_template_path"}
     ),
     "oauth": frozenset(
         {
@@ -423,6 +437,51 @@ def _boolean(value: Any, field: str) -> bool:
     if isinstance(value, str) and value.strip().lower() in {"true", "false"}:
         return value.strip().lower() == "true"
     raise ConfigError(f"{field} must be true or false")
+
+
+def _process_relative_path(value: Any, field: str) -> Path:
+    """Resolve a configured path against the MLT process working directory."""
+
+    configured = _non_empty_string(value, field)
+    try:
+        path = Path(configured)
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        return path.resolve()
+    except (OSError, RuntimeError) as error:
+        raise ConfigError(f"{field} could not be resolved: {error}") from error
+
+
+def _operating_system_config(
+    section: Mapping[str, Any],
+    environ: Mapping[str, str],
+    *,
+    required: bool,
+) -> OperatingSystemConfig | None:
+    """Build provisioning OS paths, ignoring them for ingestion-only runs."""
+
+    if not required:
+        return None
+    return OperatingSystemConfig(
+        ipxe_script_path=_process_relative_path(
+            _value(
+                section,
+                "ipxe_script_path",
+                environ,
+                "MLT_OS_IPXE_SCRIPT_PATH",
+            ),
+            "operating_system.ipxe_script_path",
+        ),
+        user_data_template_path=_process_relative_path(
+            _value(
+                section,
+                "user_data_template_path",
+                environ,
+                "MLT_OS_USER_DATA_TEMPLATE_PATH",
+            ),
+            "operating_system.user_data_template_path",
+        ),
+    )
 
 
 def _lifecycle_mode(
@@ -900,6 +959,7 @@ def load_config(
     target = _section(data, "target")
     resources = _section(data, "resources")
     lifecycle = _section(data, "lifecycle")
+    operating_system = _section(data, "operating_system")
     debug = _section(data, "debug")
     diagnostics = _section(data, "diagnostics")
     os_janitor = _section(data, "os_janitor")
@@ -1007,6 +1067,11 @@ def load_config(
                 "lifecycle.skip_factory_reset",
             ),
             test_sitewide_bmc_fallback=test_sitewide_bmc_fallback,
+        ),
+        operating_system=_operating_system_config(
+            operating_system,
+            environment,
+            required=mode is not LifecycleMode.INGESTION_ONLY,
         ),
         diagnostics=DiagnosticsConfig(
             enabled=diagnostics_enabled,

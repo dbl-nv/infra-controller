@@ -13,14 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Build a per-run MLT operating system definition and SSH identity."""
+"""Build a per-run OS definition from operator-supplied textual templates."""
+
+from __future__ import annotations
 
 import io
-import json
 import secrets
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import bcrypt
 import paramiko
@@ -28,20 +30,21 @@ import yaml
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-_TEMPLATE_DIR = Path(__file__).with_name("os_templates")
-_IPXE_TEMPLATE = _TEMPLATE_DIR / "ubuntu-24.04-arm64.ipxe"
-_USER_DATA_TEMPLATE = _TEMPLATE_DIR / "ubuntu-24.04-arm64-user-data.yaml"
 _PUBLIC_KEY_PLACEHOLDER = "__MLT_SSH_PUBLIC_KEY__"
 _ALLOW_PW_PLACEHOLDER = "__MLT_ALLOW_PW__"
 _USER_PASSWORD_PLACEHOLDER = "__MLT_USER_PASSWORD__"
 _LOCK_PASSWD_PLACEHOLDER = "__MLT_LOCK_PASSWD__"
+_PASSWORD_PLACEHOLDERS = (
+    _ALLOW_PW_PLACEHOLDER,
+    _USER_PASSWORD_PLACEHOLDER,
+    _LOCK_PASSWD_PLACEHOLDER,
+)
 
 TEMPORARY_OS_NAME_PREFIX = "mlt-os-"
 TEMPORARY_OS_DESCRIPTION = "Ephemeral machine-lifecycle-test OS"
 
 # No password hash matches '!', so the account cannot be logged into with a
-# password. This is what the template carries unless the operator opts in to
-# a console password.
+# password when an external template opts in to MLT's password controls.
 _LOCKED_PASSWORD = "!"
 
 # Deliberately excludes characters that are easy to misread when the password
@@ -53,146 +56,189 @@ _BCRYPT_ROUNDS = 12
 
 @dataclass(frozen=True)
 class EphemeralOperatingSystem:
-    """The transient OS definition and its in-memory SSH private key."""
+    """The transient OS definition and its in-memory SSH identity."""
 
     name: str
     ipxe_script: str
     user_data: str
     ssh_private_key: paramiko.PKey
+    ssh_username: str
     console_password: str | None = None
 
 
 def _hash_password(password: str) -> str:
-    """Return a bcrypt hash suitable for /etc/shadow.
+    """Return a bcrypt hash suitable for /etc/shadow."""
 
-    bcrypt rather than the stdlib ``crypt``: ``crypt`` is deprecated (PEP 594)
-    and removed in 3.13, and on macOS it offers only ``METHOD_CRYPT``, where
-    asking for SHA-512 silently yields a 13-character DES hash instead of
-    raising. A break-glass credential that is quietly wrong on the maintainer's
-    laptop is worse than one that does not build. libxcrypt on Ubuntu 24.04
-    accepts the ``$2b$`` prefix this produces.
-    """
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt(rounds=_BCRYPT_ROUNDS)).decode()
 
 
-def _render_authorized_keys(template: str, public_keys: list[str]) -> str:
-    """Expand the single key placeholder into one YAML list entry per key."""
+def _read_text(path: Path, description: str) -> str:
+    """Read one required non-empty UTF-8 text input without exposing its contents."""
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeError as error:
+        raise ValueError(f"{description} {path} is not valid UTF-8") from error
+    except OSError as error:
+        raise ValueError(f"Could not read {description} {path}: {error}") from error
+    if not text.strip():
+        raise ValueError(f"{description} {path} must not be empty")
+    return text
+
+
+def _yaml_error_location(error: yaml.YAMLError) -> str:
+    """Describe a YAML failure without copying input text into logs."""
+
+    problem = getattr(error, "problem", None) or type(error).__name__
+    mark = getattr(error, "problem_mark", None)
+    location = ""
+    if mark is not None:
+        location = f" at line {mark.line + 1}, column {mark.column + 1}"
+    return f"{problem}{location}"
+
+
+def _parse_user_data(
+    template: str, path: Path
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    """Validate cloud-init structure and locate the key-bearing concrete user."""
+
+    if template.lstrip().splitlines()[0].strip() != "#cloud-config":
+        raise ValueError(f"User-data template {path} must start with #cloud-config")
+    try:
+        document = yaml.safe_load(template)
+    except yaml.YAMLError as error:
+        raise ValueError(
+            f"User-data template {path} is not valid YAML: "
+            f"{_yaml_error_location(error)}"
+        ) from None
+    if not isinstance(document, dict):
+        raise ValueError(f"User-data template {path} must contain a YAML mapping")
+
     placeholder_count = template.count(_PUBLIC_KEY_PLACEHOLDER)
     if placeholder_count != 1:
         raise ValueError(
-            f"{_USER_DATA_TEMPLATE} must contain exactly one " +
+            f"User-data template {path} must contain exactly one "
             f"{_PUBLIC_KEY_PLACEHOLDER} placeholder; found {placeholder_count}"
         )
 
-    placeholder_line = next(
-        line for line in template.splitlines() if _PUBLIC_KEY_PLACEHOLDER in line
+    users = document.get("users")
+    if not isinstance(users, list):
+        raise ValueError(
+            f"User-data template {path} must define cloud-init users as a list"
+        )
+    matching_users: list[dict[str, Any]] = []
+    for user in users:
+        if not isinstance(user, dict):
+            continue
+        authorized_keys = user.get("ssh_authorized_keys")
+        if isinstance(authorized_keys, list) and _PUBLIC_KEY_PLACEHOLDER in authorized_keys:
+            matching_users.append(user)
+    if len(matching_users) != 1:
+        raise ValueError(
+            f"{_PUBLIC_KEY_PLACEHOLDER} in {path} must be an ssh_authorized_keys "
+            "entry on exactly one concrete cloud-init user"
+        )
+
+    ssh_user = matching_users[0]
+    name = ssh_user.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(
+            f"The cloud-init user containing {_PUBLIC_KEY_PLACEHOLDER} in {path} "
+            "must have a non-empty name"
+        )
+    if name != name.strip():
+        raise ValueError(
+            f"The cloud-init user containing {_PUBLIC_KEY_PLACEHOLDER} in {path} "
+            "must not have leading or trailing whitespace in its name"
+        )
+
+    counts = {
+        placeholder: template.count(placeholder)
+        for placeholder in _PASSWORD_PLACEHOLDERS
+    }
+    password_group_present = any(counts.values())
+    if password_group_present and any(count != 1 for count in counts.values()):
+        rendered_counts = ", ".join(
+            f"{placeholder}={count}" for placeholder, count in counts.items()
+        )
+        raise ValueError(
+            "Console-password placeholders are an all-or-none group with exactly "
+            f"one occurrence each; found {rendered_counts}"
+        )
+    if password_group_present:
+        if document.get("ssh_pwauth") != _ALLOW_PW_PLACEHOLDER:
+            raise ValueError(
+                f"{_ALLOW_PW_PLACEHOLDER} must be the top-level ssh_pwauth value"
+            )
+        if ssh_user.get("passwd") != _USER_PASSWORD_PLACEHOLDER:
+            raise ValueError(
+                f"{_USER_PASSWORD_PLACEHOLDER} must be passwd on the inferred SSH user"
+            )
+        if ssh_user.get("lock_passwd") != _LOCK_PASSWD_PLACEHOLDER:
+            raise ValueError(
+                f"{_LOCK_PASSWD_PLACEHOLDER} must be lock_passwd on the inferred SSH user"
+            )
+    return document, ssh_user, password_group_present
+
+
+def _render_user_data(
+    template: str,
+    path: Path,
+    public_keys: list[str],
+    *,
+    enable_console_password: bool,
+) -> tuple[str, str, str | None]:
+    """Validate and render cloud-init, returning text, SSH user, and password."""
+
+    document, ssh_user, password_group_present = _parse_user_data(template, path)
+    if enable_console_password and not password_group_present:
+        raise ValueError(
+            "debug.enable_console_password=true requires all three console-password "
+            f"placeholders in {path}"
+        )
+
+    authorized_keys = ssh_user["ssh_authorized_keys"]
+    placeholder_index = authorized_keys.index(_PUBLIC_KEY_PLACEHOLDER)
+    authorized_keys[placeholder_index : placeholder_index + 1] = public_keys
+
+    console_password: str | None = None
+    if password_group_present:
+        user_password = _LOCKED_PASSWORD
+        if enable_console_password:
+            console_password = "".join(
+                secrets.choice(_PASSWORD_ALPHABET) for _ in range(_PASSWORD_LENGTH)
+            )
+            user_password = _hash_password(console_password)
+        document["ssh_pwauth"] = enable_console_password
+        ssh_user["passwd"] = user_password
+        ssh_user["lock_passwd"] = not enable_console_password
+
+    rendered = "#cloud-config\n" + yaml.safe_dump(
+        document,
+        allow_unicode=True,
+        sort_keys=False,
     )
-    indent = placeholder_line[: len(placeholder_line) - len(placeholder_line.lstrip())]
-    # Quote each key. An operator-supplied key carries a free-form comment, and
-    # a bare " #" in it starts a YAML comment: the key is silently truncated
-    # there, still parses, and still counts as one entry, so the validation
-    # below cannot see it. A JSON string is a valid YAML double-quoted scalar.
-    rendered = "\n".join(
-        f"{indent}- {json.dumps(public_key)}" for public_key in public_keys
-    )
-    return template.replace(placeholder_line, rendered)
-
-
-def _validate_rendered_user_data(
-    user_data: str, *, expected_keys: int, expect_password_login: bool
-) -> None:
-    """Confirm the rendered document is the cloud-init config we intended.
-
-    Rendering splices indented list entries and injects a bcrypt hash full of
-    '$' and '/', so a template edit can produce something that parses as YAML
-    but means the wrong thing -- or does not parse at all. Either way the
-    failure would otherwise surface as a provisioning timeout an hour later,
-    with nothing pointing back at this file.
-    """
-    try:
-        document = yaml.safe_load(user_data)
-    except yaml.YAMLError as error:
-        raise ValueError(
-            f"{_USER_DATA_TEMPLATE} rendered to invalid YAML: {error}"
-        ) from error
-
-    try:
-        allow_pw = document["ssh_pwauth"]
-        users = document["users"]
-        test_user = next(
-            user
-            for user in users
-            if user.get("name") == "machine-lifecycle-test-user"
-        )
-        nvidia_user = next(
-            user for user in users if user.get("name") == "nvidia"
-        )
-        password = test_user["passwd"]
-        locked = test_user["lock_passwd"]
-        authorized = test_user["ssh_authorized_keys"]
-        nvidia_locked = nvidia_user["lock_passwd"]
-    except (AttributeError, KeyError, StopIteration, TypeError) as error:
-        raise ValueError(
-            f"{_USER_DATA_TEMPLATE} rendered without the expected cloud-init "
-            f"structure: {error}"
-        ) from error
-
-    # A quoted 'false' would be truthy to cloud-init; assert the real boolean.
-    if allow_pw is not expect_password_login:
-        raise ValueError(
-            f"rendered ssh_pwauth is {allow_pw!r}, expected {expect_password_login!r}"
-        )
-    if nvidia_locked is not True:
-        raise ValueError(
-            f"rendered nvidia lock_passwd is {nvidia_locked!r}, expected True"
-        )
-    if not isinstance(password, str) or not password:
-        raise ValueError(f"rendered user password is not a string: {password!r}")
-    # Cloud-init locks the account regardless of the hash when this is true,
-    # so a mismatch here would silently defeat the console password.
-    if locked is expect_password_login:
-        raise ValueError(
-            f"rendered lock_passwd is {locked!r} with password login "
-            f"{'enabled' if expect_password_login else 'disabled'}"
-        )
-    if not isinstance(authorized, list) or len(authorized) != expected_keys:
-        raise ValueError(
-            f"rendered {len(authorized) if isinstance(authorized, list) else authorized} "
-            f"authorized key(s), expected {expected_keys}"
-        )
-
-
-def _require_placeholder(template: str, placeholder: str) -> None:
-    count = template.count(placeholder)
-    if count != 1:
-        raise ValueError(
-            f"{_USER_DATA_TEMPLATE} must contain exactly one {placeholder} "
-            f"placeholder; found {count}"
-        )
+    return rendered, ssh_user["name"], console_password
 
 
 def build_ephemeral_operating_system(
+    ipxe_script_path: str | Path,
+    user_data_template_path: str | Path,
     *,
     debug_public_key: str | None = None,
     enable_console_password: bool = False,
 ) -> EphemeralOperatingSystem:
-    """Generate an Ed25519 identity and render it into the cloud-init template.
+    """Read external templates, generate an Ed25519 identity, and render cloud-init."""
 
-    The run's own private key is converted directly in memory to Paramiko's key
-    type. It is never written to disk or placed in an environment variable.
+    ipxe_path = Path(ipxe_script_path)
+    user_data_path = Path(user_data_template_path)
+    ipxe_script = _read_text(ipxe_path, "iPXE script")
+    if not ipxe_script.startswith("#!ipxe"):
+        raise ValueError(f"iPXE script {ipxe_path} must start with #!ipxe")
+    if "${cloudinit-url}" not in ipxe_script:
+        raise ValueError(f"iPXE script {ipxe_path} must reference ${{cloudinit-url}}")
+    user_data_template = _read_text(user_data_path, "user-data template")
 
-    ``debug_public_key`` is an optional operator-supplied public key added
-    alongside it, so a wedged instance stays reachable after the run that
-    created it has exited. It is a public key, so there is nothing secret to
-    store in the repository or hand to the operator.
-
-    ``enable_console_password`` mints a random password for
-    ``machine-lifecycle-test-user`` -- the same account the test logs in as --
-    and returns the plaintext for the caller to publish. It covers the case
-    where the box finished installing but is not reachable over SSH, leaving
-    the BMC serial console as the only way in. Note that the account carries
-    passwordless sudo, so this credential is root-equivalent.
-    """
     private_key = Ed25519PrivateKey.generate()
     public_key = (
         private_key.public_key()
@@ -212,45 +258,22 @@ def build_ephemeral_operating_system(
     with io.StringIO(private_key_text) as private_key_file:
         paramiko_key = paramiko.Ed25519Key.from_private_key(private_key_file)
 
-    authorized_keys = [public_key]
-    if debug_public_key:
-        authorized_keys.append(debug_public_key.strip())
+    public_keys = [public_key]
+    if debug_public_key and debug_public_key.strip():
+        public_keys.append(debug_public_key.strip())
 
-    console_password: str | None = None
-    user_password = _LOCKED_PASSWORD
-    if enable_console_password:
-        console_password = "".join(
-            secrets.choice(_PASSWORD_ALPHABET) for _ in range(_PASSWORD_LENGTH)
-        )
-        user_password = _hash_password(console_password)
-
-    user_data = _USER_DATA_TEMPLATE.read_text(encoding="utf-8")
-    _require_placeholder(user_data, _ALLOW_PW_PLACEHOLDER)
-    _require_placeholder(user_data, _USER_PASSWORD_PLACEHOLDER)
-    _require_placeholder(user_data, _LOCK_PASSWD_PLACEHOLDER)
-    user_data = _render_authorized_keys(user_data, authorized_keys)
-    # Single-quoted so the leading '$' of a crypt hash, and the bare '!' of a
-    # locked account, are read by YAML as literal scalars rather than as an
-    # alias or a tag indicator.
-    user_data = user_data.replace(
-        _USER_PASSWORD_PLACEHOLDER, f"'{user_password}'"
-    )
-    user_data = user_data.replace(
-        _LOCK_PASSWD_PLACEHOLDER, "false" if enable_console_password else "true"
-    )
-    user_data = user_data.replace(
-        _ALLOW_PW_PLACEHOLDER, "true" if enable_console_password else "false"
-    )
-    _validate_rendered_user_data(
-        user_data,
-        expected_keys=len(authorized_keys),
-        expect_password_login=enable_console_password,
+    user_data, ssh_username, console_password = _render_user_data(
+        user_data_template,
+        user_data_path,
+        public_keys,
+        enable_console_password=enable_console_password,
     )
 
     return EphemeralOperatingSystem(
         name=f"{TEMPORARY_OS_NAME_PREFIX}{uuid.uuid4().hex[:12]}",
-        ipxe_script=_IPXE_TEMPLATE.read_text(encoding="utf-8"),
+        ipxe_script=ipxe_script,
         user_data=user_data,
         ssh_private_key=paramiko_key,
+        ssh_username=ssh_username,
         console_password=console_password,
     )

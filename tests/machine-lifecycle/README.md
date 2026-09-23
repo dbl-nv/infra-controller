@@ -46,8 +46,8 @@ change the implementation selected by MLT.
 | `vr` | NVIDIA | Not implemented | Test/reporting profile only; it has no separate reset driver. |
 
 All profiles require at least one DPU and the configured DPU count must match
-NICo inventory. Provisioning (`full` and `provision-only`) currently supports
-ARM64 targets only. An `ingestion-only` run does not boot the provisioning OS.
+NICo inventory. The external iPXE definition determines the provisioning
+architecture and artifacts. An `ingestion-only` run does not read or boot it.
 
 ## Prerequisites
 
@@ -65,14 +65,14 @@ Before running MLT, provide:
   from which MLT can obtain one.
 - For provisioning, an existing tenant-derived IPv4 IP block. MLT can create
   the VPC and prefix, but it does not create the IP block.
-- For provisioning, outbound HTTPS from the target machine to
-  `d1veq6e8nuk2fy.cloudfront.net` and connectivity from MLT to the instance's
+- For provisioning, target-machine access to every artifact location selected
+  by the configured iPXE script, and connectivity from MLT to the instance's
   SSH port.
 - Python 3.12 and `uv` for a checkout-based run, or a registry in which to
   publish the supplied container image.
 
-The runner may be AMD64 or ARM64. That is independent of the ARM64 architecture
-required for the machine being provisioned.
+The runner architecture is independent of the target architecture selected by
+the external OS definition.
 
 ## Build and test
 
@@ -253,14 +253,17 @@ requires it.
 | `resources.vpc_prefix_length` | `MLT_VPC_PREFIX_LENGTH` | — | IPv4 prefix length from `8` through `31`. |
 | `resources.cleanup` | `MLT_CLEANUP_NETWORK_RESOURCES` | `true` | Delete only network resources created by this run. |
 | `resources.create_missing` | `MLT_CREATE_MISSING_NETWORK_RESOURCES` | `true` | Create a missing VPC or prefix; set false when another system owns them. |
+| `operating_system.ipxe_script_path` | `MLT_OS_IPXE_SCRIPT_PATH` | — | External textual iPXE script. |
+| `operating_system.user_data_template_path` | `MLT_OS_USER_DATA_TEMPLATE_PATH` | — | External cloud-init YAML template. |
 | `lifecycle.mode` | `MLT_MODE` | `full` | `full`, `ingestion-only`, or `provision-only`. |
 | `lifecycle.provision_cycles` | `PROVISION_CYCLES` | `1` | Positive number of provision/delete cycles. |
 | `lifecycle.skip_factory_reset` | `SKIP_FACTORY_RESET` | `false` | Skip host and DPU factory reset. This is independent of lifecycle mode. |
 | `lifecycle.test_sitewide_bmc_fallback` | `TEST_SITEWIDE_BMC_FALLBACK` | `false` | Exercise site-wide BMC fallback after removing per-machine credentials. Invalid with `provision-only`. |
 
 Site and target fields are always required. The complete `[resources]` identity
-is required for `full` and `provision-only`; it may be omitted for
-`ingestion-only`. If any resource identity field is supplied, all four are
+and `[operating_system]` are required for `full` and `provision-only`; both OS
+paths may be omitted and are ignored for `ingestion-only`. Relative OS paths resolve
+against the MLT process working directory. If any resource identity field is supplied, all four are
 validated even in `ingestion-only` mode. Existing resources are reused only
 when their site, virtualization type, parent VPC, IP block, and prefix length
 match.
@@ -270,7 +273,7 @@ match.
 | TOML key | Environment override | Default | Meaning |
 |---|---|---|---|
 | `debug.ssh_public_key` | `MLT_DEBUG_SSH_PUBLIC_KEY` | unset | Add an operator public key alongside the per-run key. |
-| `debug.enable_console_password` | `ENABLE_MLT_DEBUG_CONSOLE_PASSWORD` | `false` | Generate a privileged console/SSH password and write it below `ARTIFACT_DIR`. |
+| `debug.enable_console_password` | `ENABLE_MLT_DEBUG_CONSOLE_PASSWORD` | `false` | Generate a console/SSH password and write it below `ARTIFACT_DIR`. |
 | `debug.keep_instance` | `ENABLE_MLT_DEBUG_KEEP_INSTANCE` | `false` | Deliberately retain the instance and fail the run for investigation. Invalid with more than one provision cycle. |
 | `os_janitor.enabled` | `MLT_OS_JANITOR_ENABLED` | `false` | Check for stale temporary MLT OS definitions before the run. |
 | `os_janitor.minimum_age_hours` | `MLT_OS_JANITOR_MINIMUM_AGE_HOURS` | `24` | Positive minimum age of an eligible stale definition. |
@@ -413,23 +416,24 @@ MLT_CONFIG=config/config.toml \
   uv run --frozen python tests/lifecycle/machine_lifecycle_test.py
 ```
 
-## Built-in provisioning OS
+## External provisioning OS definitions
 
-MLT intentionally has one fixed Ubuntu 24.04 ARM64 provisioning profile. The
-URLs are not operator configuration. During provisioning the target downloads:
+`[operating_system]` points to operator-supplied UTF-8 iPXE and cloud-init text.
+MLT uploads only those textual definitions; the configured iPXE script selects
+and retrieves all boot and image artifacts. The script must start with `#!ipxe`
+and reference `${cloudinit-url}`.
 
-| Artifact | Fixed URL | Published SHA-256 |
-|---|---|---|
-| ARM64 qcow imager | `https://d1veq6e8nuk2fy.cloudfront.net/nke-isos/qcow/efi/aarch64/2026-06-10/1781128122/qcow-imager.efi` | `0dafc237c07c412ac19fcf725294d5b7723e4b7c5d7e7c5feb25eb5495fc3250` |
-| Ubuntu 24.04 ARM64 LVM image | `https://d1veq6e8nuk2fy.cloudfront.net/nke-isos/qcow/images/24.04/aarch64/lvm/2026-06-10/950/nke-24.04-aarch64-lvm-2026-06-10-950.qcow2` | `6535b3ab54105ed5f6554c46e90e2aaa016486da23b64ba7c22f35a42f4bcd1d` |
+The cloud-init YAML must put exactly one `__MLT_SSH_PUBLIC_KEY__` item in
+`ssh_authorized_keys` for a concrete user with a non-empty name. MLT generates
+a fresh Ed25519 key, renders its public half there, infers the SSH username from
+that user, and keeps the private half in memory. There are no built-in templates
+or fallback profile.
 
-MLT generates an Ed25519 key for each run, places only its public key in the
-temporary OS definition's cloud-init, and keeps the private key in memory. Root
-login and password authentication are disabled by default.
-
-The image is installed with a fixed, publicly known LUKS passphrase, so this
-provisioning profile provides no disk confidentiality. The instance exists
-only for the duration of the run and is deleted with it.
+The optional `__MLT_ALLOW_PW__`, `__MLT_USER_PASSWORD__`, and
+`__MLT_LOCK_PASSWD__` placeholders are an all-or-none group. When supplied they
+must control top-level `ssh_pwauth` and the inferred user's `passwd` and
+`lock_passwd`. The default render remains locked; console-password debugging
+unlocks only that inferred user and is rejected when the group is absent.
 
 ## Artifacts, failure handling, and cleanup
 
@@ -446,8 +450,8 @@ only for the duration of the run and is deleted with it.
   and fails the run. Delete the instance manually after debugging or the
   machine remains allocated.
 - `debug.ssh_public_key` adds an operator key for break-glass access.
-  `debug.enable_console_password` writes a generated privileged password below
-  `ARTIFACT_DIR`; protect that output as a root-equivalent secret.
+  `debug.enable_console_password` writes a generated password below
+  `ARTIFACT_DIR`; protect it according to the configured user's privileges.
 - On selected ingestion failures MLT may put the machine into maintenance mode
   for investigation. Operators must inspect and recover the machine before its
   next run.
@@ -479,8 +483,8 @@ only for the duration of the run and is deleted with it.
   in the NICo API namespace and pod/deployment read permissions.
 - **NICo bearer expires:** use the `[oauth]` flow instead of a directly supplied
   `NICO_TOKEN` so MLT can refresh it.
-- **Provisioning cannot download the image:** verify ARM64 firmware boot and
-  target-machine HTTPS egress to the fixed CloudFront host.
+- **Provisioning cannot download its artifacts:** verify firmware compatibility
+  and target-machine access to the locations selected by the configured iPXE.
 - **SSH is not immediately ready:** the instance can report `Ready` before the
   final boot environment and cloud-init key installation complete. MLT retries
   authenticated SSH within its bounded readiness window.

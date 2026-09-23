@@ -14,348 +14,279 @@
 # limitations under the License.
 
 import base64
-import re
 
 import bcrypt
 import pytest
 import yaml
 
-from lib import ephemeral_os
 from lib.ephemeral_os import build_ephemeral_operating_system
 
-_DEBUG_KEY = (
-    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB9V6E0000000000000000000000000000000000000 "
-    "operator@example"
-)
+_IPXE = "#!ipxe\necho ${cloudinit-url}\n"
+_USER_DATA = """#cloud-config
+users:
+  - default
+  - name: portable-test-user
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - __MLT_SSH_PUBLIC_KEY__
+"""
+_PASSWORD_USER_DATA = """#cloud-config
+ssh_pwauth: __MLT_ALLOW_PW__
+users:
+  - name: portable-test-user
+    passwd: __MLT_USER_PASSWORD__
+    lock_passwd: __MLT_LOCK_PASSWD__
+    ssh_authorized_keys:
+      - __MLT_SSH_PUBLIC_KEY__
+"""
+_DEBUG_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB9V6E0 operator@example"
 
 
-def _authorized_key_lines(user_data: str) -> list[str]:
-    """Return the authorized keys cloud-init will actually see.
-
-    Read them out of the parsed document rather than by matching raw lines:
-    the keys are YAML-quoted, and a scrape would silently return nothing --
-    or, worse, a truncated key -- instead of failing.
-    """
-
-    def _find(node: object) -> list[str] | None:
-        if isinstance(node, dict):
-            for key, value in node.items():
-                if key == "ssh_authorized_keys" and isinstance(value, list):
-                    return value
-                if (found := _find(value)) is not None:
-                    return found
-        elif isinstance(node, list):
-            for item in node:
-                if (found := _find(item)) is not None:
-                    return found
-        return None
-
-    return _find(yaml.safe_load(user_data)) or []
+def _inputs(tmp_path, *, ipxe=_IPXE, user_data=_USER_DATA):
+    ipxe_path = tmp_path / "boot.ipxe"
+    user_data_path = tmp_path / "user-data.yaml"
+    ipxe_path.write_text(ipxe, encoding="utf-8")
+    user_data_path.write_text(user_data, encoding="utf-8")
+    return ipxe_path, user_data_path
 
 
-def _authorized_key_blob(user_data: str) -> bytes:
-    lines = _authorized_key_lines(user_data)
-    assert lines, "no ssh-ed25519 authorized-key line found in user_data"
-    return base64.b64decode(lines[0].split()[1], validate=True)
+def _build(tmp_path, **kwargs):
+    return build_ephemeral_operating_system(*_inputs(tmp_path), **kwargs)
 
 
-def test_ephemeral_os_embeds_the_public_half_of_its_private_key():
-    operating_system = build_ephemeral_operating_system()
-
-    assert operating_system.name.startswith("mlt-os-")
-    assert "__MLT_SSH_PUBLIC_KEY__" not in operating_system.user_data
-    assert (
-        _authorized_key_blob(operating_system.user_data)
-        == operating_system.ssh_private_key.asbytes()
-    )
-    assert "disable_root: true" in operating_system.user_data
-    assert "phone_home:" not in operating_system.user_data
-    assert operating_system.ipxe_script.startswith("#!ipxe\n")
-    # The semicolon must reach the kernel command line unescaped. A backslash
-    # here survives into /proc/cmdline; cloud-init then reads the datasource
-    # name as "nocloud-net\" and never parses s=<url>.
-    assert "ds=nocloud-net;s=${cloudinit-url}" in operating_system.ipxe_script
-    assert "\\;" not in operating_system.ipxe_script
-    assert "qcow-imager.efi" in operating_system.ipxe_script
-    assert (
-        "nke-24.04-aarch64-lvm-2026-06-10-950.qcow2"
-        in operating_system.ipxe_script
-    )
-    assert "console=ttyAMA0,115200" in operating_system.ipxe_script
-    assert "disk_strategy=${disk-strategy}" in operating_system.ipxe_script
-
-
-def test_ephemeral_os_uses_a_new_identity_and_name_each_time():
-    first = build_ephemeral_operating_system()
-    second = build_ephemeral_operating_system()
-
-    assert first.name != second.name
-    assert first.ssh_private_key.asbytes() != second.ssh_private_key.asbytes()
-
-
-def test_ephemeral_os_locks_password_login_by_default():
-    operating_system = build_ephemeral_operating_system()
-
-    assert operating_system.console_password is None
-    assert "ssh_pwauth: false" in operating_system.user_data
-    assert "passwd: '!'" in operating_system.user_data
-    assert "lock_passwd: true" in operating_system.user_data
-    assert "__MLT_ALLOW_PW__" not in operating_system.user_data
-    assert "__MLT_USER_PASSWORD__" not in operating_system.user_data
-    assert "__MLT_LOCK_PASSWD__" not in operating_system.user_data
-
-
-def test_ephemeral_os_authorizes_only_its_own_key_by_default():
-    operating_system = build_ephemeral_operating_system()
-
-    assert len(_authorized_key_lines(operating_system.user_data)) == 1
-
-
-def test_ephemeral_os_keeps_a_debug_key_whose_comment_looks_like_yaml():
-    """An operator key is free-form text and must survive rendering intact.
-
-    A bare " #" in the comment starts a YAML comment, so an unquoted key is
-    truncated there. It still parses and still counts as one entry, so only
-    comparing the key itself catches it.
-    """
-    awkward_key = f'{_DEBUG_KEY} #2 spare: "primary"'
-    operating_system = build_ephemeral_operating_system(
-        debug_public_key=awkward_key
-    )
-
-    assert _authorized_key_lines(operating_system.user_data)[1] == awkward_key
-
-
-def test_ephemeral_os_adds_the_operator_debug_key_when_configured():
-    operating_system = build_ephemeral_operating_system(debug_public_key=_DEBUG_KEY)
-
-    authorized = _authorized_key_lines(operating_system.user_data)
-    assert len(authorized) == 2
-    # The run's own key still comes first, so the test's own login is unaffected.
-    assert (
-        base64.b64decode(authorized[0].split()[1], validate=True)
-        == operating_system.ssh_private_key.asbytes()
-    )
-    assert authorized[1] == _DEBUG_KEY
-    # A second key must not disturb the surrounding YAML block.
-    assert "      ssh_authorized_keys:" in operating_system.user_data
-
-
-def test_ephemeral_os_debug_key_does_not_enable_password_login():
-    operating_system = build_ephemeral_operating_system(debug_public_key=_DEBUG_KEY)
-
-    assert operating_system.console_password is None
-    assert "ssh_pwauth: false" in operating_system.user_data
-
-
-def test_ephemeral_os_mints_a_console_password_when_enabled():
-    operating_system = build_ephemeral_operating_system(
-        enable_console_password=True
-    )
-
-    password = operating_system.console_password
-    assert password is not None and len(password) == 20
-    assert "ssh_pwauth: true" in operating_system.user_data
-    # The plaintext must never reach the OS definition; only its hash does.
-    assert password not in operating_system.user_data
-    assert "passwd: '$2b$" in operating_system.user_data
-    assert "lock_passwd: false" in operating_system.user_data
-
-
-def test_console_password_is_not_expired_on_first_login():
-    """An expired password meets the debugger with a forced change, not a shell."""
-    cloud_config = _rendered(
-        build_ephemeral_operating_system(enable_console_password=True).user_data
-    )
-
-    assert cloud_config["chpasswd"]["expire"] is False
-
-
-def test_ephemeral_os_console_password_hash_actually_verifies():
-    """Guards against a crypt backend that silently returns a truncated hash.
-
-    The stdlib ``crypt`` does exactly that on macOS: asking for SHA-512 yields
-    a 13-character DES hash and no error, so the password would be unusable at
-    the console with nothing to indicate why.
-    """
-    operating_system = build_ephemeral_operating_system(
-        enable_console_password=True
-    )
-
-    match = re.search(r"passwd: '([^']+)'", operating_system.user_data)
-    assert match is not None, "no user password rendered into user_data"
-    rendered_hash = match.group(1)
-
-    assert bcrypt.checkpw(
-        operating_system.console_password.encode(), rendered_hash.encode()
-    )
-    assert not bcrypt.checkpw(b"not-the-password", rendered_hash.encode())
-
-
-def test_ephemeral_os_uses_a_new_console_password_each_time():
-    first = build_ephemeral_operating_system(enable_console_password=True)
-    second = build_ephemeral_operating_system(enable_console_password=True)
-
-    assert first.console_password != second.console_password
-
-
-def _rendered(user_data: str) -> dict:
-    return yaml.safe_load(user_data)
-
-
-def _test_user(cloud_config: dict) -> dict:
+def _ssh_user(operating_system):
+    document = yaml.safe_load(operating_system.user_data)
     return next(
         user
-        for user in cloud_config["users"]
-        if user["name"] == "machine-lifecycle-test-user"
+        for user in document["users"]
+        if isinstance(user, dict)
+        and operating_system.ssh_private_key.asbytes()
+        == base64.b64decode(user["ssh_authorized_keys"][0].split()[1])
     )
 
 
+def test_embeds_a_new_per_run_ed25519_key_and_infers_its_username(tmp_path):
+    first = _build(tmp_path)
+    second = _build(tmp_path)
+
+    assert first.name.startswith("mlt-os-")
+    assert first.name != second.name
+    assert first.ssh_private_key.asbytes() != second.ssh_private_key.asbytes()
+    assert first.ssh_username == "portable-test-user"
+    assert _ssh_user(first)["name"] == first.ssh_username
+    assert "__MLT_SSH_PUBLIC_KEY__" not in first.user_data
+    assert first.ipxe_script == _IPXE
+
+
+def test_adds_the_debug_public_key_without_changing_the_inferred_user(tmp_path):
+    awkward_key = f'{_DEBUG_KEY} #2 spare: "primary"'
+    operating_system = _build(tmp_path, debug_public_key=awkward_key)
+
+    assert operating_system.ssh_username == "portable-test-user"
+    assert _ssh_user(operating_system)["ssh_authorized_keys"][1] == awkward_key
+
+
+@pytest.mark.parametrize("which", ["ipxe", "user-data"])
+def test_rejects_missing_inputs(which, tmp_path):
+    ipxe_path, user_data_path = _inputs(tmp_path)
+    missing = tmp_path / "missing"
+
+    with pytest.raises(ValueError, match="Could not read"):
+        build_ephemeral_operating_system(
+            missing if which == "ipxe" else ipxe_path,
+            missing if which == "user-data" else user_data_path,
+        )
+
+
+@pytest.mark.parametrize("which", ["ipxe", "user-data"])
+def test_rejects_unreadable_inputs(which, tmp_path):
+    ipxe_path, user_data_path = _inputs(tmp_path)
+    unreadable = tmp_path / "directory"
+    unreadable.mkdir()
+
+    with pytest.raises(ValueError, match="Could not read"):
+        build_ephemeral_operating_system(
+            unreadable if which == "ipxe" else ipxe_path,
+            unreadable if which == "user-data" else user_data_path,
+        )
+
+
+@pytest.mark.parametrize("which", ["ipxe", "user-data"])
+def test_rejects_empty_inputs(which, tmp_path):
+    ipxe_path, user_data_path = _inputs(tmp_path)
+    (ipxe_path if which == "ipxe" else user_data_path).write_text(
+        " \n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        build_ephemeral_operating_system(ipxe_path, user_data_path)
+
+
+@pytest.mark.parametrize("which", ["ipxe", "user-data"])
+def test_rejects_non_utf8_inputs(which, tmp_path):
+    ipxe_path, user_data_path = _inputs(tmp_path)
+    (ipxe_path if which == "ipxe" else user_data_path).write_bytes(b"\xff\xfe")
+
+    with pytest.raises(ValueError, match="not valid UTF-8"):
+        build_ephemeral_operating_system(ipxe_path, user_data_path)
+
+
 @pytest.mark.parametrize(
-    "kwargs",
+    ("ipxe", "message"),
     [
-        {},
-        {"debug_public_key": _DEBUG_KEY},
-        {"enable_console_password": True},
-        {"debug_public_key": _DEBUG_KEY, "enable_console_password": True},
+        ("echo ${cloudinit-url}\n", "start with #!ipxe"),
+        ("#!ipxe\necho no-cloud-init\n", r"reference \$\{cloudinit-url\}"),
     ],
-    ids=["default", "debug-key", "console-password", "both"],
 )
-def test_rendered_user_data_is_valid_yaml(kwargs):
-    """cloud-init rejects the whole document if rendering breaks the YAML."""
-    operating_system = build_ephemeral_operating_system(**kwargs)
+def test_rejects_invalid_ipxe_contract(ipxe, message, tmp_path):
+    paths = _inputs(tmp_path, ipxe=ipxe)
 
-    cloud_config = _rendered(operating_system.user_data)
-
-    assert cloud_config["disable_root"] is True
-    assert _test_user(cloud_config)["name"] == "machine-lifecycle-test-user"
-
-
-def test_allow_pw_renders_as_a_real_boolean_not_a_string():
-    """A quoted 'false' parses as a truthy string and would enable password auth."""
-    disabled = _rendered(build_ephemeral_operating_system().user_data)
-    enabled = _rendered(
-        build_ephemeral_operating_system(enable_console_password=True).user_data
-    )
-
-    assert disabled["ssh_pwauth"] is False
-    assert enabled["ssh_pwauth"] is True
-
-
-def test_locked_password_survives_yaml_as_a_literal_bang():
-    """A bare '!' is a YAML tag indicator, so it has to come back as a string."""
-    cloud_config = _rendered(build_ephemeral_operating_system().user_data)
-
-    assert _test_user(cloud_config)["passwd"] == "!"
-    assert _test_user(cloud_config)["lock_passwd"] is True
-
-
-def test_the_image_identity_account_is_always_locked():
-    """The qcow image's seeded nvidia account must not retain password access."""
-    for kwargs in ({}, {"enable_console_password": True}):
-        cloud_config = _rendered(
-            build_ephemeral_operating_system(**kwargs).user_data
-        )
-        nvidia_user = next(
-            user for user in cloud_config["users"] if user["name"] == "nvidia"
-        )
-        assert nvidia_user["lock_passwd"] is True
+    with pytest.raises(ValueError, match=message):
+        build_ephemeral_operating_system(*paths)
 
 
 @pytest.mark.parametrize(
-    ("nvidia_entry", "expected_error"),
+    ("user_data", "message"),
     [
-        ("", "expected cloud-init structure"),
+        ("#cloud-config\nusers: [\n", "not valid YAML"),
+        ("users: []\n", "start with #cloud-config"),
+        ("#cloud-config\nusers: []\n", "exactly one"),
         (
-            "    - name: nvidia\n      lock_passwd: false\n",
-            "rendered nvidia lock_passwd is False, expected True",
+            "#cloud-config\nnote: __MLT_SSH_PUBLIC_KEY__\nusers: []\n",
+            "concrete cloud-init user",
+        ),
+        (
+            "#cloud-config\nusers:\n  - ssh_authorized_keys:\n"
+            "      - __MLT_SSH_PUBLIC_KEY__\n",
+            "non-empty name",
+        ),
+        (
+            _USER_DATA.replace(
+                "      - __MLT_SSH_PUBLIC_KEY__",
+                "      - __MLT_SSH_PUBLIC_KEY__\n      - __MLT_SSH_PUBLIC_KEY__",
+            ),
+            "exactly one",
         ),
     ],
-    ids=["missing", "unlocked"],
 )
-def test_rendered_user_data_requires_a_locked_nvidia_account(
-    monkeypatch, tmp_path, nvidia_entry, expected_error
+def test_rejects_invalid_cloud_init_and_key_placeholder_contract(
+    user_data, message, tmp_path
 ):
-    template = ephemeral_os._USER_DATA_TEMPLATE.read_text(encoding="utf-8")
-    template = template.replace(
-        "    - name: nvidia\n      lock_passwd: true\n", nvidia_entry
-    )
-    modified = tmp_path / "modified-user-data.yaml"
-    modified.write_text(template, encoding="utf-8")
-    monkeypatch.setattr(ephemeral_os, "_USER_DATA_TEMPLATE", modified)
+    paths = _inputs(tmp_path, user_data=user_data)
 
-    with pytest.raises(ValueError, match=expected_error):
-        build_ephemeral_operating_system()
+    with pytest.raises(ValueError, match=message):
+        build_ephemeral_operating_system(*paths)
 
 
-def test_console_password_unlocks_the_account_it_is_set_on():
-    """cloud-init locks the account regardless of hash if lock_passwd stays true."""
-    cloud_config = _rendered(
-        build_ephemeral_operating_system(enable_console_password=True).user_data
+def test_rejects_ssh_username_with_surrounding_whitespace(tmp_path):
+    paths = _inputs(
+        tmp_path,
+        user_data=_USER_DATA.replace(
+            "name: portable-test-user", 'name: " portable-test-user "'
+        ),
     )
 
-    assert _test_user(cloud_config)["lock_passwd"] is False
+    with pytest.raises(ValueError, match="leading or trailing whitespace"):
+        build_ephemeral_operating_system(*paths)
 
 
-def test_password_hash_survives_yaml_intact():
-    """bcrypt hashes are full of '$' and '/', which YAML must not reinterpret."""
+def test_yaml_errors_do_not_expose_template_contents(tmp_path):
+    secret_marker = "template-content-must-not-be-logged"
+    paths = _inputs(
+        tmp_path,
+        user_data=(
+            "#cloud-config\nusers:\n"
+            f"  - name: {secret_marker}\n"
+            "    broken: [\n"
+            "    ssh_authorized_keys: [__MLT_SSH_PUBLIC_KEY__]\n"
+        ),
+    )
+
+    with pytest.raises(ValueError) as raised:
+        build_ephemeral_operating_system(*paths)
+
+    assert secret_marker not in str(raised.value)
+
+
+def test_password_placeholders_may_all_be_absent_for_normal_ssh(tmp_path):
+    operating_system = _build(tmp_path)
+
+    assert operating_system.console_password is None
+    assert operating_system.ssh_username == "portable-test-user"
+
+
+@pytest.mark.parametrize(
+    "user_data",
+    [
+        _USER_DATA + "ssh_pwauth: __MLT_ALLOW_PW__\n",
+        _PASSWORD_USER_DATA.replace("    passwd: __MLT_USER_PASSWORD__\n", ""),
+        _PASSWORD_USER_DATA.replace("    lock_passwd: __MLT_LOCK_PASSWD__\n", ""),
+    ],
+)
+def test_rejects_partial_password_placeholder_groups(user_data, tmp_path):
+    paths = _inputs(tmp_path, user_data=user_data)
+
+    with pytest.raises(ValueError, match="all-or-none"):
+        build_ephemeral_operating_system(*paths)
+
+
+def test_console_password_requires_the_optional_placeholder_group(tmp_path):
+    with pytest.raises(ValueError, match="enable_console_password=true requires"):
+        _build(tmp_path, enable_console_password=True)
+
+
+def test_password_group_preserves_secure_defaults(tmp_path):
     operating_system = build_ephemeral_operating_system(
-        enable_console_password=True
+        *_inputs(tmp_path, user_data=_PASSWORD_USER_DATA)
     )
+    document = yaml.safe_load(operating_system.user_data)
+    user = _ssh_user(operating_system)
 
-    parsed = _test_user(_rendered(operating_system.user_data))["passwd"]
+    assert operating_system.console_password is None
+    assert document["ssh_pwauth"] is False
+    assert user["passwd"] == "!"
+    assert user["lock_passwd"] is True
 
-    assert parsed.startswith("$2b$")
-    assert bcrypt.checkpw(operating_system.console_password.encode(), parsed.encode())
 
-
-def test_authorized_keys_render_as_a_list_of_the_right_length():
-    one = _rendered(build_ephemeral_operating_system().user_data)
-    two = _rendered(
-        build_ephemeral_operating_system(debug_public_key=_DEBUG_KEY).user_data
+def test_console_password_is_rendered_for_the_inferred_ssh_user(tmp_path):
+    operating_system = build_ephemeral_operating_system(
+        *_inputs(tmp_path, user_data=_PASSWORD_USER_DATA),
+        enable_console_password=True,
     )
+    document = yaml.safe_load(operating_system.user_data)
+    user = _ssh_user(operating_system)
 
-    def keys(cloud_config):
-        return _test_user(cloud_config)["ssh_authorized_keys"]
-
-    assert len(keys(one)) == 1
-    assert len(keys(two)) == 2
-    assert keys(two)[1] == _DEBUG_KEY
-
-
-def test_a_template_that_renders_to_broken_yaml_is_rejected(monkeypatch, tmp_path):
-    """The builder must fail here, not an hour later in a provisioning timeout."""
-    broken = tmp_path / "broken-user-data.yaml"
-    broken.write_text(
-        "#cloud-config\n"
-        "ssh_pwauth: __MLT_ALLOW_PW__\n"
-        "users:\n"
-        "    - name: machine-lifecycle-test-user\n"
-        "      passwd: __MLT_USER_PASSWORD__\n"
-        "     lock_passwd: __MLT_LOCK_PASSWD__\n"  # <- bad indent
-        "      ssh_authorized_keys:\n"
-        "        - __MLT_SSH_PUBLIC_KEY__\n",
-        encoding="utf-8",
+    assert operating_system.console_password is not None
+    assert document["ssh_pwauth"] is True
+    assert user["lock_passwd"] is False
+    assert bcrypt.checkpw(
+        operating_system.console_password.encode(), user["passwd"].encode()
     )
-    monkeypatch.setattr(ephemeral_os, "_USER_DATA_TEMPLATE", broken)
-
-    with pytest.raises(ValueError, match="invalid YAML"):
-        build_ephemeral_operating_system()
+    assert operating_system.console_password not in operating_system.user_data
 
 
-def test_a_template_missing_the_expected_structure_is_rejected(monkeypatch, tmp_path):
-    """Valid YAML that is not the document cloud-init expects still fails."""
-    wrong = tmp_path / "wrong-user-data.yaml"
-    wrong.write_text(
-        "#cloud-config\n"
-        "ssh_pwauth: __MLT_ALLOW_PW__\n"
-        "passwd: __MLT_USER_PASSWORD__\n"
-        "lock_passwd: __MLT_LOCK_PASSWD__\n"
-        "keys:\n"
-        "    - __MLT_SSH_PUBLIC_KEY__\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(ephemeral_os, "_USER_DATA_TEMPLATE", wrong)
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        (
+            "ssh_pwauth: __MLT_ALLOW_PW__",
+            "note: __MLT_ALLOW_PW__",
+            "top-level ssh_pwauth",
+        ),
+        (
+            "passwd: __MLT_USER_PASSWORD__",
+            "note: __MLT_USER_PASSWORD__",
+            "must be passwd",
+        ),
+        (
+            "lock_passwd: __MLT_LOCK_PASSWD__",
+            "other: __MLT_LOCK_PASSWD__",
+            "must be lock_passwd",
+        ),
+    ],
+)
+def test_password_group_must_control_the_inferred_user(old, new, message, tmp_path):
+    paths = _inputs(tmp_path, user_data=_PASSWORD_USER_DATA.replace(old, new))
 
-    with pytest.raises(ValueError, match="expected cloud-init structure"):
-        build_ephemeral_operating_system()
+    with pytest.raises(ValueError, match=message):
+        build_ephemeral_operating_system(*paths)
