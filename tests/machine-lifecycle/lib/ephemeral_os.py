@@ -146,10 +146,10 @@ def _parse_user_data(
             f"The cloud-init user containing {_PUBLIC_KEY_PLACEHOLDER} in {path} "
             "must have a non-empty name"
         )
-    if name != name.strip():
+    if any(character.isspace() for character in name):
         raise ValueError(
             f"The cloud-init user containing {_PUBLIC_KEY_PLACEHOLDER} in {path} "
-            "must not have leading or trailing whitespace in its name"
+            "must not contain whitespace in its name"
         )
 
     counts = {

@@ -609,6 +609,7 @@ def test_provisioning_warns_and_skips_cleanup_when_disabled(monkeypatch, capsys)
 def test_provisioning_does_not_warn_when_disabled_cleanup_has_no_owned_resources(
     monkeypatch, capsys
 ):
+    os_cleanup_calls = []
     test_config = SimpleNamespace(
         resources=SimpleNamespace(cleanup=False),
         provision_cycles=0,
@@ -634,6 +635,13 @@ def test_provisioning_does_not_warn_when_disabled_cleanup_has_no_owned_resources
         ),
     )
     monkeypatch.setattr(
+        lifecycle,
+        "_cleanup_temporary_operating_system",
+        lambda name, operating_system_uuid: os_cleanup_calls.append(
+            (name, operating_system_uuid)
+        ),
+    )
+    monkeypatch.setattr(
         network_resources,
         "cleanup_network_resources",
         lambda _ownership: pytest.fail("cleanup is disabled"),
@@ -652,6 +660,8 @@ def test_provisioning_does_not_warn_when_disabled_cleanup_has_no_owned_resources
             ),
             0.0,
         )
+
+    assert os_cleanup_calls == [("mlt-os-test", None)]
 
     assert "WARNING" not in capsys.readouterr().out
 

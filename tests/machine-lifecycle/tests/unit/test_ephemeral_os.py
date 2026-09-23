@@ -178,15 +178,16 @@ def test_rejects_invalid_cloud_init_and_key_placeholder_contract(
         build_ephemeral_operating_system(*paths)
 
 
-def test_rejects_ssh_username_with_surrounding_whitespace(tmp_path):
+@pytest.mark.parametrize("name", [" portable-test-user ", "portable test user"])
+def test_rejects_ssh_username_with_whitespace(tmp_path, name):
     paths = _inputs(
         tmp_path,
         user_data=_USER_DATA.replace(
-            "name: portable-test-user", 'name: " portable-test-user "'
+            "name: portable-test-user", f'name: "{name}"'
         ),
     )
 
-    with pytest.raises(ValueError, match="leading or trailing whitespace"):
+    with pytest.raises(ValueError, match="must not contain whitespace"):
         build_ephemeral_operating_system(*paths)
 
 
