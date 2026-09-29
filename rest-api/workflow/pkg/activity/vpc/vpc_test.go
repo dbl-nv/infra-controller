@@ -932,7 +932,7 @@ func TestManageVpc_UpdateVpcsInDB_AutoCreatesAndRestores(t *testing.T) {
 		adminInventory := &corev1.VPCInventory{
 			Vpcs: []*corev1.Vpc{{
 				Id:       &corev1.VpcId{Value: adminVpcID.String()},
-				Config:   &corev1.VpcConfig{TenantOrganizationId: coreInternalTenantOrganizationID},
+				Config:   &corev1.VpcConfig{TenantOrganizationId: systemTenantOrganizationID},
 				Metadata: &corev1.Metadata{Name: "admin"},
 			}},
 		}

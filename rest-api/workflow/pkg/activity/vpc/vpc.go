@@ -31,9 +31,9 @@ import (
 	cwutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
-// coreInternalTenantOrganizationID is the organization Core assigns to its own admin VPC
+// systemTenantOrganizationID is the organization Core assigns to its own admin VPC
 // (crates/api-core/src/db_init.rs). That VPC is system-owned and never a REST tenant VPC.
-const coreInternalTenantOrganizationID = "carbide_internal"
+const systemTenantOrganizationID = "carbide_internal"
 
 // ManageVpc is an activity wrapper for managing VPC lifecycle that allows
 // injecting DB access
@@ -480,7 +480,7 @@ func (mv ManageVpc) createOrUpdateVpcFromSite(
 
 	reportedVpc := new(cdbm.Vpc)
 	reportedVpc.FromProto(controllerVpc)
-	if reportedVpc.Org == coreInternalTenantOrganizationID {
+	if reportedVpc.Org == systemTenantOrganizationID {
 		return nil
 	}
 	if reportedVpc.Name == "" {
