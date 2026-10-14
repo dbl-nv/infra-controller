@@ -27,10 +27,13 @@ metrics port for each component:
 | nico-pxe | 8080 | Boot request counts |
 | nico-ssh-console-rs | 9009 | Console sessions, BMC connections |
 
-All NICo metrics use the `carbide_` prefix. Metric types are indicated by the `# TYPE`
-comment in Prometheus exposition format. Note that NICo uses `_count` as a suffix for
-some gauges (e.g., `carbide_hosts_usable_count`, `carbide_dpus_healthy_count`) - check
-the `# TYPE` metadata to determine the actual metric type.
+Metrics in the [generated Core catalogue](core_metrics.md) use the `carbide_` prefix. A small
+number of legacy Core metrics (such as `site_explorer_create_switches_latency_seconds` and
+`site_explorer_create_power_shelves_latency_seconds`) predate this convention. Metric types
+are indicated by the `# TYPE` comment in Prometheus exposition format. Some Core gauges, such
+as `carbide_hosts_usable_count` and
+`carbide_dpus_healthy_count`, use `_count` as a suffix; check the `# TYPE` metadata to
+determine the actual metric type.
 
 ### Metrics Services and IPv6
 
@@ -373,9 +376,12 @@ for identifying individual stuck objects.
 | `carbide_machine_dpu_info` | gauge | Host-to-DPU associations (one series per DPU). |
 | `carbide_machine_instance_info` | gauge | Machine-to-instance and tenant associations. |
 
-All metrics use labels `object_type` and `object_id`. State metrics add `state` and
-`substate` labels. These series exist only while true: transitions replace entries,
-deletions clear them immediately.
+The state metrics and `carbide_object_info` use labels `object_type` and `object_id`.
+State metrics add `state` and `substate` labels. The association metrics use their own
+labels instead: `carbide_machine_dpu_info` has `machine_id` and `dpu_id`, and
+`carbide_machine_instance_info` has `machine_id`, `instance_id`, and `tenant_org`.
+These series exist only while true: transitions replace entries, deletions clear them
+immediately.
 
 ### Configuration
 

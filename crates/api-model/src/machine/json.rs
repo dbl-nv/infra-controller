@@ -35,6 +35,7 @@ use crate::machine::infiniband::MachineInfinibandStatusObservation;
 use crate::machine::network::{MachineNetworkStatusObservation, ManagedHostNetworkConfig};
 use crate::machine::nvlink::MachineNvLinkStatusObservation;
 use crate::machine::spx::MachineSpxStatusObservation;
+use crate::machine::status::MlxDeviceObservation;
 use crate::machine::topology::MachineTopology;
 use crate::machine::{
     AnyMachine, Dpf, DpuMachine, FailureDetails, HostMachine, HostProfile, HostReprovisionRequest,
@@ -47,6 +48,7 @@ use crate::machine_boot_interface::{
     MachineBootInterfaceTarget, canonical_redfish_boot_interface_id,
 };
 use crate::metadata::Metadata;
+use crate::nic_firmware::NicFirmwareProfileId;
 use crate::power_manager::PowerOptions;
 use crate::rack::RackFirmwareUpgradeStatus;
 use crate::sku::SkuStatus;
@@ -70,6 +72,8 @@ pub struct MachineSnapshotPgJson {
     pub infiniband_status_observation: Option<MachineInfinibandStatusObservation>,
     pub nvlink_status_observation: Option<MachineNvLinkStatusObservation>,
     pub spx_status_observation: Option<MachineSpxStatusObservation>,
+    /// Latest complete MLX collection stored on the machine, if one exists.
+    pub mlx_device_observation: Option<MlxDeviceObservation>,
     #[serde(default)]
     pub extension_service_status_observations: InstanceExtensionServiceStatusObservationByType,
     pub controller_state_version: String,
@@ -101,6 +105,8 @@ pub struct MachineSnapshotPgJson {
     pub cleanup_machine_validation_id: Option<MachineValidationId>,
     pub dpu_agent_upgrade_requested: Option<UpgradeDecision>,
     pub firmware_autoupdate: Option<bool>,
+    /// Optional machine-wide NIC firmware profile reference.
+    pub nic_firmware_profile_id: Option<NicFirmwareProfileId>,
     pub health_reports: Option<HealthReportSources>,
     pub on_demand_machine_validation_id: Option<MachineValidationId>,
     pub on_demand_machine_validation_request: Option<bool>,
@@ -343,6 +349,7 @@ impl TryFrom<MachineSnapshotPgJson> for AnyMachine {
             rack_id: value.rack_id,
             config: MachineConfig {
                 firmware_autoupdate: value.firmware_autoupdate,
+                nic_firmware_profile_id: value.nic_firmware_profile_id,
                 instance_type_id: value.instance_type_id,
                 dpf: value.dpf,
                 hw_sku: value.hw_sku,
@@ -371,6 +378,7 @@ impl TryFrom<MachineSnapshotPgJson> for AnyMachine {
                 infiniband_status_observation: value.infiniband_status_observation,
                 nvlink_status_observation: value.nvlink_status_observation,
                 spx_status_observation: value.spx_status_observation,
+                mlx_device_observation: value.mlx_device_observation,
                 extension_service_status_observations: value.extension_service_status_observations,
                 slot_number: value.slot_number,
                 tray_index: value.tray_index,

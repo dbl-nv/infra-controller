@@ -40,10 +40,62 @@ forge_test_pass=
 update_grub_template="yes"
 update_grub_cfg="yes"
 
+# Downloads the complete request URL to one caller-visible local filename while
+# preserving each forwarded curl argument as a separate value.
 function curl_url() {
 	url=$1
-	auth=$2
-	curl --retry 5 --retry-all-errors -k -L -O $auth $url 2>&1 | tee $log_output
+	shift
+	# Keep a distro-selected checksum filename; otherwise use only the
+	# explicit URL path so query parameters cannot change the local name.
+	if [ -z "$file" ]; then
+		file=$(basename "${url%%\?*}")
+	fi
+	curl --retry 5 --retry-all-errors -k -L "$@" \
+		--output "$file" "$url" 2>&1 | tee "$log_output"
+}
+
+# Announces the download without exposing URL queries, which may contain
+# credentials, to stdout or the imaging log.
+function announce_image_download() {
+	echo "Downloading image" | tee "$log_output"
+}
+
+# build_image_auth_args populates the image_auth array with the curl arguments
+# needed to authenticate the image download, or leaves it empty when
+# image_auth_token is unset. Kept as an array, not a string, so the header
+# value survives as a single argument instead of being word-split.
+#
+# The header is written to a 0600 temporary file and passed via curl's -K
+# config-file flag, rather than -H on the command line, so the token does not
+# appear in this process's argument list (visible to other local processes
+# through /proc/<pid>/cmdline or ps). image_auth_header_file is left set so
+# the caller can remove it once the download is done.
+function build_image_auth_args() {
+	image_auth=()
+	image_auth_header_file=
+	if [ -n "$image_auth_token" ]; then
+		if [ -z "$image_auth_type" ]; then
+			image_auth_type=Bearer
+		fi
+
+		# Escape curl's quoted config-value syntax (backslash first, so the
+		# backslash this introduces for a literal quote is not itself
+		# re-escaped).
+		escaped_type=${image_auth_type//\\/\\\\}
+		escaped_type=${escaped_type//\"/\\\"}
+		escaped_token=${image_auth_token//\\/\\\\}
+		escaped_token=${escaped_token//\"/\\\"}
+
+		image_auth_header_file=$(mktemp) || return 1
+		if ! chmod 600 "$image_auth_header_file" ||
+			! printf 'header = "Authorization: %s %s"\n' "$escaped_type" "$escaped_token" \
+				>"$image_auth_header_file"; then
+			rm -f "$image_auth_header_file"
+			image_auth_header_file=
+			return 1
+		fi
+		image_auth=(-K "$image_auth_header_file")
+	fi
 }
 
 function verify_sha() {
@@ -1054,19 +1106,22 @@ function main() {
 		return 1;
 	fi
 
-	if [ -z $file ]; then
-		file=$(basename $image_url)
+	if ! build_image_auth_args; then
+		echo "Failed to prepare image authentication" | tee "$log_output"
+		return 1
+	fi
+	if [ -n "$image_auth_header_file" ]; then
+		# Safety net for an interrupted download: the normal-path cleanup
+		# below removes the file and clears this trap once curl_url returns.
+		trap 'rm -f "$image_auth_header_file"' EXIT INT TERM
 	fi
 
-	if [ ! -z "$image_auth_token" ]; then
-		if [ -z "$image_auth_type" ]; then
-		       image_auth_type=Bearer
-		fi
-		image_auth="-H \"Authorization: $image_auth_type $image_auth_token\""
+	announce_image_download
+	curl_url "$image_url" "${image_auth[@]}"
+	if [ -n "$image_auth_header_file" ]; then
+		rm -f "$image_auth_header_file"
+		trap - EXIT INT TERM
 	fi
-
-	echo "Downloading image from $image_url" | tee $log_output
-	curl_url $image_url $image_auth
 	if [ ! -z "$image_sha" ]; then
 		echo "Verifying image with digest $image_sha" | tee $log_output
 		verify_sha $image_sha
@@ -1092,7 +1147,7 @@ function main() {
 	precheck_image_identifiers || return 1
 
 	echo "Imaging $file to $image_disk" | tee $log_output
-	qemu-img convert -p -O raw -S 0 $file $image_disk 2>&1 | tee $log_output
+	qemu-img convert -p -O raw -S 0 "$file" "$image_disk" 2>&1 | tee $log_output
 	ret=$?
 	if [ $ret -ne 0 ]; then
 		echo "Imaging failed $ret" | tee $log_output

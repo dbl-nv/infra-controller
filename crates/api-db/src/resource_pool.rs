@@ -14,6 +14,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+pub mod binding;
+
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
@@ -1411,7 +1413,6 @@ fn expand_ipv6_prefix_range(
 
     let start_addr: u128 = start_net.network().into();
     let end_addr: u128 = end_net.network().into();
-    let step = 1u128 << (128 - prefix_len as u32);
 
     if end_addr <= start_addr {
         return Err(DefineResourcePoolError::InvalidArgument(
@@ -1419,6 +1420,8 @@ fn expand_ipv6_prefix_range(
         ));
     }
 
+    // The order check rejects /0 before this would shift by 128 bits.
+    let step = 1u128 << (128 - prefix_len as u32);
     let count = (end_addr - start_addr) / step;
     if count > MAX_POOL_SIZE as u128 {
         return Err(DefineResourcePoolError::TooBig(
@@ -1581,7 +1584,9 @@ mod tests {
     use carbide_instrument::testing::{MetricsCapture, capture_logs, capture_logs_async};
     use carbide_test_support::Outcome::*;
     use carbide_test_support::query_counter::count_queries;
-    use carbide_test_support::{Case, Check, check_cases, check_cases_async, check_values};
+    use carbide_test_support::{
+        Case, Check, check_cases, check_cases_async, check_values, value_scenarios,
+    };
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
     use super::*;
@@ -2273,6 +2278,12 @@ mod tests {
                 allocate_exact(&pool_handle, &mut txn, OwnerType::Vpc, "owner", 42).await?;
             assert_eq!(allocated, 42);
 
+            if auto_assign {
+                let result =
+                    allocate_exact(&pool_handle, &mut txn, OwnerType::Vpc, "owner", 42).await;
+                assert!(matches!(result, Err(DatabaseError::FailedPrecondition(_))));
+            }
+
             let rows: Vec<(
                 i32,
                 sqlx::types::Json<ResourcePoolEntryState>,
@@ -2796,6 +2807,24 @@ mod tests {
         assert_eq!(prefixes.len(), 2);
         assert_eq!(prefixes[0], "fd00::100/120".parse::<Ipv6Network>().unwrap());
         assert_eq!(prefixes[1], "fd00::200/120".parse::<Ipv6Network>().unwrap());
+    }
+
+    #[test]
+    fn test_expand_ipv6_prefix_range_rejects_non_increasing_endpoints() {
+        value_scenarios!(run = |(start, end)| {
+            matches!(
+                expand_ipv6_prefix_range(start, end),
+                Err(DefineResourcePoolError::InvalidArgument(_))
+            )
+        };
+            "empty /0 range" {
+                ("::/0", "::/0") => true,
+            }
+
+            "reversed endpoints" {
+                ("fd00::300/120", "fd00::100/120") => true,
+            }
+        );
     }
 
     #[test]
