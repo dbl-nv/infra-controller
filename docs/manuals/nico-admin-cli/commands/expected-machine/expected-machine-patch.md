@@ -136,7 +136,7 @@ value.
 
 Static BMC IP (updates pre-allocated machine_interface when safe, same
 as expected switches). Must not be unspecified, multicast, or IPv4
-limited broadcast
+limited broadcast, including the IPv4-mapped IPv6 form of each
 
 `--extended`
 

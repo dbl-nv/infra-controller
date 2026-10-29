@@ -130,7 +130,7 @@ internal UUIDs that are used to associate instances.
 
 Static BMC IP (pre-allocates machine_interface for site explorer, same
 as expected switches). Must not be unspecified, multicast, or IPv4
-limited broadcast
+limited broadcast, including the IPv4-mapped IPv6 form of each
 
 `--bmc-retain-credentials <BMC_RETAIN_CREDENTIALS>`
 
