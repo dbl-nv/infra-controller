@@ -98,7 +98,7 @@ pub(crate) struct Args {
     #[clap(
         long = "bmc-ip-address",
         value_name = "BMC_IP_ADDRESS",
-        help = "BMC IP address of the power shelf",
+        help = "BMC IP address of the power shelf. Must not be unspecified, multicast, or IPv4 limited broadcast",
         action = clap::ArgAction::Append
     )]
     bmc_ip_address: Option<IpAddr>,

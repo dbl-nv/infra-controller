@@ -92,7 +92,8 @@ Rack ID for this power shelf
 
 `--bmc-ip-address <BMC_IP_ADDRESS>`
 
-BMC IP address of the power shelf
+BMC IP address of the power shelf. Must not be unspecified, multicast,
+or IPv4 limited broadcast
 
 `--bmc-retain-credentials <BMC_RETAIN_CREDENTIALS>`
 
